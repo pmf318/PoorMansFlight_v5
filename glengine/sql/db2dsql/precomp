@@ -1,0 +1,38 @@
+#!/bin/bash
+###############################################
+# Script to generate BIND file from sqc
+# Params: 
+# $1: database
+# $2: sqc source, name of precompiler output
+# $3: BIND file
+# $4: user (optional)
+# $5: pwd  (optional)
+################################################
+
+
+
+if (( $# > 3 )) 
+then
+    echo "Connecting to $1, user: $4"
+    if (( $# == 5 ))
+    then 
+        db2 connect to $1 user $4 using $5
+    else
+	db2 connect to $1 user $4
+    fi
+else
+    echo "Connecting to local db $1"
+    db2 connect to $1 
+fi
+
+###############################################
+
+### Do not edit below ##############
+rm $2.c 
+rm $2.cpp
+echo "Copying dsqlobj.sqc to $2.sqc"
+cp dsqlobj.sqc $2.sqc
+db2 prep $2.sqc bindfile using $2.bnd NOLINEMACRO
+echo "Copying $2.c to  $2.cpp"
+cp $2.c $2.cpp
+mv $2.bnd $3/$2.bnd

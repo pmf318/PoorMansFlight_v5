@@ -1,0 +1,8 @@
+This is zlib necessary for building PMF5 on Windows.
+
+Downloaded from
+zlib.net/zlib128.zip
+
+Built with
+nmake -f win32/Makefile.msc
+

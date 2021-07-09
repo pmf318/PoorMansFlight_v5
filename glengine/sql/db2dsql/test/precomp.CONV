@@ -1,0 +1,6 @@
+db2 connect to sample
+rm ../dsqlobj.c 
+rm ../dsqlobj.cpp
+db2 prep ../dsqlobj.sqc bindfile using dsqlobj.bnd NOLINEMACRO WCHARTYPE CONVERT
+cp ../dsqlobj.c ../dsqlobj.cpp
+db2 bind dsqlobj.bnd

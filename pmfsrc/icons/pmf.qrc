@@ -1,0 +1,18 @@
+ <!DOCTYPE RCC><RCC version="1.0">
+ <qresource>
+     <file>leftarr.png</file>
+     <file>rightarr.png</file>
+     <file>addTab.png</file>     
+     <file>closeTab.png</file>
+     <file>closeTab_hover.png</file>     
+     <file>pmfhelp.htm</file>
+     <file>pmfHelp_con.html</file>
+     <file>odbc01.png</file>
+     <file>odbc02.png</file>
+     <file>odbc03.png</file>
+     <file>odbc04.png</file>
+     <file>odbc05.png</file>
+     <file>odbc06.png</file>     
+     <file>odbc07.png</file>
+ </qresource>
+ </RCC>

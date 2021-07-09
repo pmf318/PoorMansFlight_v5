@@ -1,0 +1,123 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html>
+<head>
+  <meta name="description" content="table editor for LINUX, OS2, WINDOWS">
+  <title>PoorMan'sFlight</title>
+</head>
+
+<body bgcolor="#ffffff" link="#0000ff" text="#000000">
+
+
+<center>
+<h3 style="color: blue;">Poor Man's Flight - Help<p></p>
+</h3>
+
+</center>
+
+
+A short description of PMF's functions:<p>
+
+
+<font color="red">Menu</font><br>
+<ul>
+<li><strong>Connect</strong><br>This will bring up the login dialog.
+<li><strong>Next tab, new tab and close tab</strong><br>You can open/view as many tables as you like but only in the same database. Use Menu->New Tab and Menu->Close Tab or STRG+T and STRG+W to open and close tabs.
+<li><strong>DB Info</strong><br>Information for all DB2 databases currently accessible on your system. "Internal version" is a hex number by the way.
+<li><strong>Query db</strong><br>Use this to search in tables. You can search for host variable (i.e. column name) or table contents like numbers or strings. If you want to find a certain string, 
+you need to put the string in quotes, e.g. 'SomeStringToFind'. If you want to search via LIKE, you need to specify the string like this: '%StringToFi%'. The search for strings is case sensitive.
+<li><strong>Delete tables</strong><br>Will drop the selected tables. A backup before deletion would be a good idea.
+<li><strong>Find identical rows</strong><br>This will find (and if desired, delete) identical rows from the selected tables. 
+<li><strong>Table spaces</strong><br>Displays table space information.
+<li><strong>Table sizes</strong><br>Estimates the size of tables, based on runstats information. Do runstats on tables where size information is negative.
+</ul>
+<br>
+<font color="red">Table</font><br>
+<ul>
+<li><strong>Create DDL</strong><br>This will create a DDL file, containing column, index and trigger information for the selected table. 
+<li><strong>Index/Reorg/Runstats/Rebind/Alter</strong><br>Helps you to create and drop indexes, do reorgs, runstats and rebinds. 'Alter table' allows you to add columns to a table. You may need to reorganize the table after adding or deleting a column.
+<li><strong>Export</strong><br>Export data from a table into DEL, WSF, IXF and plain text files. You can either export the currently selected subset or the whole table. If the table contains LOBs, check 'Export LOBs' and they will be written to extra files.
+<li><strong>Import</strong><br>Import data into a table from DEL, WSF and IXF files. Only IXF files can be used to create a table.
+</ul>
+<br>
+<font color="red">Administration</font><br>
+<ul>
+<li><strong>Snapshot</strong><br>Some more or less useful information gleened from the snapshot API.
+</ul>
+<br>
+<font color="red">Settings</font><br>
+<ul>
+<li><strong>Configuration</strong><br>Currently you can set the maximum number of rows that should be read, default is 2000.
+<li><strong>Set font</strong><br>Lets you change the font.
+<li><strong>Connection profiles</strong><br>Add, change and remove connection profiles, i.e. database, user and password. You can set one profile as default profile. CAUTION: The passwords will be stored in clear text in a file called 'connset' in your home directory.
+<li><strong>Style</strong><br>Chose between different styles.
+<li><strong>CharForBitData</strong><br>CharForBitData can be displayed in binary or HEX format or as a generic marker.
+<li><strong>Count rows</strong><br>This will do a 'SELECT COUNT(*) FROM currentTable' whenever you open or refresh a table. The number of rows will be displayed in the INFO field at the bottom. CAUTION: On large tables this can take a lot of time.
+<li><strong>Read uncommitted rows</strong><br>Checked: PMF will read rows that are currently pending, meaning that they were changed but the changes are not committed yet. Of course it's impossible to update such a row. Unchecked: PMF will only read committed rows.
+This forces PMF to wait until rows are committed, which in turn may lead to timeouts.
+
+<li><strong>Info</strong><br>
+</ul>
+<font color="red">Bookmarks</font><br>
+<ul>
+<li><strong>Add bookmark</strong><br>Store SQL statements as a bookmark.
+<li><strong>Edit bookmark</strong><br>Change and delete bookmarks.
+</ul>
+
+
+
+You can open/view as many tables as you like (in the same database). Use Menu->New Tab and Menu->Close Tab or STRG+T and STRG+W to open and close tabs.
+<p>
+<font color="red">Tables and navigation</font><br>
+<ul>
+<li>Back and forward buttons: Use these to go back and forth in the SQL command history for this tab</li>
+<li>Yelllow field: Name of the current database</li>
+<li>First ComboBox: Table schemata. Select a schema.</li>
+<li>Second ComboBox: Tables in the previously selected schema. Select a table to view its contents.</li>
+<li>Button "Open": Reloads the currently selected table. <b>CAUTION:</b> Pending changes will be lost!</li>
+<li>Rows to fetch: PMF will cut the result of a SELECT after 2000 rows (default). If you want to display more or less rows,
+enter a number here.</li>
+<li>Single Row: This forces PMF to use CURRENT OF CURSOR for UPDATES and DELETES. Check this, if
+you have multiple identical rows in your table (or rethink your table design). "SingleLine" might also be useful
+if you have to deal with very large VARCHAR columns. Do NOT use this in combination with a SELECT that 
+has an ORDER BY clause, because CURRENT OF CURSOR is not valid in statements containing ORDER BY.</li>
+</ul>
+
+<p>
+<font color="red">Dataviewer</font><br>
+<ul>
+<li>Here you can edit the table's data. Use the cursor keys to navigate cells, use 'F2' to activate a cell for editing. </li>
+<li><u>Changes will not be comitted until you click 'Save'.</u></li>
+</ul>
+Right-clicking on a cell will open the Filter. This is one of these things which are hard to explain but easy to use. Try it, it's easy to learn and very useful (at least for me).<br>
+The first filter will select all rows where the selected column has the selected cell's data.<br>
+The second filter will add the cell's data to an existing WHERE clause (in the field 'SQL Cmd' below).<br>
+The third filter will generate a SELECT statement which will select only this row.
+<p>
+<font color="red">Buttons</font><br>
+<ul>
+<li>New Row: To create a new row, select an existing row and click 'New Row' (CTRL+N). The new row will be created below the original row. Click 'Save' (CTRL+S) to commit.</li>
+<li>Save: After editing cells or inserting new rows, click 'Save' (CTRL+S). No changes will be comitted until you click 'Save'</li>
+<li>Delete: Select rows by clicking on the vertical header. You can use the usual keys (SHIFT, CTRL or CTRL+A) to select multiple rows.</li>
+<li>Run (F5): Executes the command in the field 'SQL Cmd' below.</li>
+<li>Ext SQL: Opens a very simple editor for multi-lined SQL statements</li>
+<li>LOB->File: Exports LOBs (LargeObjects) to files. For each LOB in each selected row, you will be prompted for a file name.</li>
+<li> File->LOB: When inserting new rows with a LOB-column you will be prompted for a file which contains the LOB to insert.</li>
+</ul>
+<p>
+<font color="red">SQL</font><br>
+Enter an SQL statement here (SELECT, INSERT, UPDATE, DELETE but also commands that are not necessarily table-related: CREATE VIEW, DROP, ....) and click 'Run Cmd' or hit F5 to execute. <br>
+These commands will be persistently stored in the ComboBox 'Stored Cmds'.
+<p>
+<font color="red">Filter</font><br>
+Use these ComboBoxes to create SQL statements. 
+<p>
+<font color="red">Stored Cmds</font><br>
+Previously executed statements are stored here.
+<p>
+<font color="red">Info</font><br>
+Information about pending Inserts and Updates, number of displayed rows and timereons. Timerons is an internal value, mainly used to measure the performance of SELECTs. 
+SELECTs using a high-cardinality index can yield Timerons of 50 or lower.
+
+
+</body>
+</html>

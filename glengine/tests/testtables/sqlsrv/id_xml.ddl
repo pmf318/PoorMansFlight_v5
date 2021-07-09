@@ -1,0 +1,6 @@
+CREATE TABLE "IMAGECENTER"."TEST"."ID_XML" (
+    "ID"     uniqueIdentifier NOT NULL,
+    "NAME"    VARCHAR(50) NOT NULL   DEFAULT '' ,
+    "XMLDATA"    XML ,
+    "CREATETIME"    DATETIME2 NOT NULL   DEFAULT getDate()
+);

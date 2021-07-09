@@ -1,0 +1,5288 @@
+
+//
+//  This file is part of PMF (Poor Man's Flight), see README.PMF for details
+//  Author: Gregor Leipelt (gregor@leipelt.de)
+//
+//
+//  -- DO NOT LOOK AT THIS CODE! You may go blind. --
+//
+
+//#include "..\..\..\pmfsrc\threadbox.h"
+#include <iostream>
+#include <locale>
+#include <gstring.hpp>
+#include <string.h>
+#include <gstuff.hpp>
+#include <gdebug.hpp>
+
+//#include <iconv.h>
+
+
+#ifndef _dsqlobj_
+#include "dsqlobj.hpp"
+#endif
+
+#include "sqlca.h"
+#include "sqlda.h"
+#include <sqlenv.h>
+#include "sqlutil.h"
+
+#if defined(__GNUC__) && __GNUC__ < 3
+#include <ostream.h>
+#else
+#include <ostream>
+#endif
+
+//#include <iostream.h>
+#include <stdio.h>
+#include <fcntl.h>
+#include <stdlib.h>
+
+#if defined(MAKE_VC) || defined(__MINGW32__)
+#include <sys\types.h>
+#include <sys\stat.h>
+#include <io.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <cstdint>
+#else
+#include <unistd.h>
+#endif
+
+
+
+#include <ctype.h>
+
+//#include <qrect.h>
+
+static  struct sqlca    sqlca;
+//static  struct sqlda    *sqlDA;
+static  char            SqlMsg[1024];
+SQL_STRUCTURE sqlvar2 *sqlvar2;
+
+EXEC SQL BEGIN DECLARE SECTION;
+char    stmt[32660];
+char    stmt2[4000];
+char    stmt3[4000];
+char    stmt4[4000];
+char    stmt5[4000];
+char    sqlDB[257];
+char    sqlPWD[257];
+char    sqlUID[257];
+char    sqlCommand[4000];
+char    longData[32660];
+static char  sqlGetBlob[2048];
+
+EXEC SQL END DECLARE SECTION;
+
+
+#ifndef min
+#define min(A,B) ((A) <(B) ? (A):(B))
+#endif
+
+#ifndef max
+#define max(A,B) ((A) >(B) ? (A):(B))
+#endif
+
+int _stopThread;
+
+#ifndef SQL_TYP_XML
+#define SQL_TYP_XML 988
+#define SQL_TYP_NXML (SQL_TYP_XML+SQL_TYP_NULINC)
+#endif
+
+
+
+
+//Get first n bytes of an XML:
+#define XML_MAX 5000
+struct xmlblob_t{
+    sqluint32 length;
+    char data[XML_MAX];
+} xmlblob;
+
+
+///////////////////////////////////////////
+//Global static instance counter.
+//Each instance saves its private instance value in m_iMyInstance.
+static int m_dsqlobjCounter = 0;
+//////////////////////////////////////////
+
+
+/***********************************************************************
+ * This class can either be instatiated or loaded via dlopen/loadlibrary
+ ***********************************************************************/
+
+//Define functions with C symbols (create/destroy instance).
+#ifdef MAKE_VC
+extern "C" _declspec(dllexport) dsqlobj* create()
+#elif __MINGW32__
+extern "C" __declspec(dllexport) dsqlobj* create()
+#else
+extern "C" dsqlobj* create()
+#endif
+{
+    //printf("dsqlobj: extC create called\n");
+    return new dsqlobj();
+}
+#ifdef MAKE_VC
+extern "C" _declspec(dllexport) void destroy(dsqlobj* pDSQLOBJ)
+#elif __MINGW32__
+extern "C" __declspec(dllexport) void destroy(dsqlobj* pDSQLOBJ)
+#else
+extern "C" void destroy(dsqlobj* pDSQLOBJ)
+#endif
+{
+    //printf("dsqlobj: extC destroy called\n");
+#if defined(MAKE_VC) || defined (__MINGW32__)
+    //flushall();
+#endif
+    if( pDSQLOBJ ) delete pDSQLOBJ ;
+}
+
+
+/*********************************************
+* commit:
+* 0: do not commit, application needs to COMMIT/ROLLBACK
+* 1: commit whenever possible (on INS, UPD, DEL and no errors)
+*
+* setEmbrace:
+* 0: Do nothing
+* 1: Set Fielddata: string -> 'string' and 'str'ing' -> 'str''ing'
+* 
+* charForBit
+* 0: Old 
+* 1: Set "@DSQL@FOR_BIT_DATA" as fieldData
+* 2: Give fieldData as BIN
+* 3: Give fieldData as HEX (default), application may need to revert data to BIN on INS,UPD,DEL
+*
+*********************************************/
+dsqlobj::dsqlobj(short commit, short setEmbrace, short charForBit) ///: IDSQL(commit, setEmbrace, charForBit)
+{
+    iEmbrace         = setEmbrace;
+    iNumberOfRows    = 0;
+    iNumberOfColumns = 0;
+    iStop            = 0;
+    iCommit          = commit;
+    iErrCode         = 0;
+    iCost            = 0;
+    _stopThread      = 0;
+    m_iReadCLOBs     = 1;
+    m_iCharForBit    = charForBit;
+
+    m_iTruncationLimit = 32700;
+    m_iGetResultAsHEX = 0;
+
+    m_pRowAtCrs = NULL;
+    m_dsqlobjCounter++;
+    m_iMyInstance = m_dsqlobjCounter;
+    m_iReadUncommitted = 0;
+    m_pGDB = NULL;
+    m_strLastSqlSelectCommand = "";
+    tm("dsqlobj CTOR, counter: "+GString(m_iMyInstance));
+}
+/*********************************************
+* CopyConstructor
+*********************************************/
+
+dsqlobj::dsqlobj( dsqlobj const & aDSQL) //: IDSQL(aDSQL)
+{
+    m_dsqlobjCounter++;
+    //m_IDSQCounter++;
+    m_iMyInstance =  m_dsqlobjCounter;
+
+    iEmbrace         = aDSQL.iEmbrace;
+    iNumberOfRows    = 0;
+    iNumberOfColumns = 0;
+    iStop            = 0;
+    iCommit          = aDSQL.iCommit;
+    iErrCode         = 0;
+    iCost            = 0;
+    _stopThread      = 0;
+    m_iReadCLOBs     = 0;
+    m_iCharForBit    = aDSQL.m_iCharForBit;
+    m_iTruncationLimit = aDSQL.m_iTruncationLimit;
+    m_iGetResultAsHEX = aDSQL.m_iGetResultAsHEX;
+    m_pGDB            = aDSQL.m_pGDB;
+    m_pRowAtCrs = NULL;
+    m_strDB = aDSQL.m_strDB;
+    m_strHost = aDSQL.m_strHost;
+    m_strPWD = aDSQL.m_strPWD;
+    m_strUID = aDSQL.m_strUID;
+    m_iPort  = aDSQL.m_iPort;
+    m_iReadUncommitted = aDSQL.m_iReadUncommitted;
+    m_strLastSqlSelectCommand = aDSQL.m_strLastSqlSelectCommand;
+
+    tm("CopyCTor");
+    /*
+  unsigned int i, j;
+  GString data;
+  GLineHdl * pLine;
+  //allRowsSeq     = aDSQL.allRowsSeq;
+  for( i = 1; i <= aDSQL.allRowsSeq.numberOfElements(); ++i )
+  {
+          pLine = new GLineHdl;
+          for( j = 1; j <= aDSQL.iNumberOfColumns; ++j )
+          {
+             data = aDSQL.rowElement(i,j);
+             pLine->addElement( data );
+          //srcLine = (GLineHdl*)aDSQL.allRowsSeq.elementAtPosition(i);
+          //pLine = new GLineHdl(*srcLine);
+          }
+          allRowsSeq.add(pLine);
+  }
+
+  hostVarSeq      = aDSQL.hostVarSeq;
+  sqlTypeSeq      = aDSQL.sqlTypeSeq;
+  sqlVarLengthSeq = aDSQL.sqlVarLengthSeq;
+  sqlIndVarSeq    = aDSQL.sqlIndVarSeq;
+  sqlLenSeq       = aDSQL.sqlLenSeq;
+  sqlForBitSeq    = aDSQL.sqlForBitSeq;
+  m_iReadCLOBs    = aDSQL.m_iReadCLOBs;
+
+tm("Copy Ctor, all seqs copied");
+  iNumberOfRows   = allRowsSeq.numberOfElements();
+  iNumberOfColumns = hostVarSeq.numberOfElements();
+  iEmbrace = aDSQL.iEmbrace;
+  iCommit  = aDSQL.iCommit;
+
+tm("Checking CopyCTor: ");
+
+  for( i = 1; i <= iNumberOfRows; ++i )
+  {
+      for( j = 1; j <= iNumberOfColumns; ++j )
+      {
+          tm("row: "+GString(i)+", col: "+GString(j)+", data: "+rowElement(i, j));
+      }
+  }
+  */
+    m_pRowAtCrs = NULL;
+    tm("CopyCTor DONE");
+}
+dsqlobj* dsqlobj::clone() const
+{
+    //printf("clone called\n");
+    return new dsqlobj(*this);
+}
+dsqlobj::~dsqlobj()
+{
+    GRowHdl * aLine;
+
+    clearAllSequences();
+
+    //Have to clear Main Sequence manually: Objects are created with "new"
+    tm("Destructor...Elements to clear: "+GString(allRowsSeq.numberOfElements()));
+    while( !allRowsSeq.isEmpty() )
+    {
+        aLine = allRowsSeq.firstElement();
+        //aLine->deleteLine();
+        delete aLine;
+        allRowsSeq.removeFirst();
+    }
+
+    m_seqConSet.deleteAll();
+    m_dsqlobjCounter--;
+    //m_IDSQCounter--;
+    tm("Destructor done, current count: "+GString(m_dsqlobjCounter));
+
+}
+/******************************************
+* AssignmentOperator
+******************************************/
+/*
+dsqlobj &dsqlobj::operator=(dsqlobj aDSQL)
+{
+    m_pGDB = aDSQL.m_pGDB;
+    tm("AssignmentOP.");
+    unsigned int i, j;
+    GString data;
+    GRowHdl * pLine;
+
+    //int rows = aDSQL.iNumberOfRows;
+    for( i = 1; i <= aDSQL.allRowsSeq.numberOfElements(); ++i )
+    {
+        pLine = new GRowHdl;
+        for( j = 1; j <= aDSQL.iNumberOfColumns; ++j )
+        {
+            data = aDSQL.rowElement(i,j);
+            pLine->addElement( data );
+            //srcLine = (GLineHdl*)aDSQL.allRowsSeq.elementAtPosition(i);
+            //pLine = new GLineHdl(*srcLine);
+        }
+        allRowsSeq.add(pLine);
+    }
+    ///allRowsSeq     = aDSQL.allRowsSeq;
+    hostVarSeq      = aDSQL.hostVarSeq;
+    sqlTypeSeq      = aDSQL.sqlTypeSeq;
+    sqlVarLengthSeq = aDSQL.sqlVarLengthSeq;
+    sqlIndVarSeq    = aDSQL.sqlIndVarSeq;
+    sqlForBitSeq    = aDSQL.sqlForBitSeq;
+    sqlLenSeq       = aDSQL.sqlLenSeq;
+    simpleColTypeSeq = aDSQL.simpleColTypeSeq;
+    iNumberOfRows   = allRowsSeq.numberOfElements();
+    iNumberOfColumns = hostVarSeq.numberOfElements();
+    m_iTruncationLimit = aDSQL.m_iTruncationLimit;
+
+
+
+    //  tm("Checking AssignOp: ");
+    //  for( i = 1; i <= iNumberOfRows; ++i )
+    //  {
+    //      for( j = 1; j <= iNumberOfColumns; ++j )
+    //      {
+    //          tm("row: "+GString(i)+", col: "+GString(j)+", data: "+rowElement(i, j));
+    //      }
+    //  }
+
+    tm("operator= DONE");
+    return *this;
+}
+*/
+GString dsqlobj::version()
+{
+    return "DSQLOBJ v 1.0 (C) Gregor Leipelt";
+}
+
+
+int dsqlobj::commit( )
+{
+    EXEC SQL COMMIT;
+    return( SQLCODE);
+}
+
+int  dsqlobj::rollback( )
+{
+    EXEC SQL ROLLBACK;
+    return( SQLCODE);
+}
+
+GString dsqlobj::sqlError()
+{
+    if( !iErrCode ) return "";
+    //sqlaintp( SqlMsg, sizeof(SqlMsg), 1024, &sqlca );
+    sqlaintp( SqlMsg, sizeof(SqlMsg), 100, &sqlca );
+    //return( GString(&SqlMsg[0]) );
+    return( GString(SqlMsg) );
+}
+signed int dsqlobj::sqlCode()
+{
+    return( iErrCode );
+}
+
+GString dsqlobj::connect(GString dataBase, GString uid, GString pwd, GString nodeName, GString port)
+{
+    tm("Connect called. DB: "+dataBase+", node: "+nodeName+", port: "+port);
+
+    m_strDB = dataBase;
+    m_strHost = nodeName;
+    m_strPWD = pwd;
+    m_strUID = uid;
+    m_iPort = port;
+    strcpy(sqlDB, dataBase.subString(1, sizeof(sqlDB)-1));
+    strcpy(sqlUID, uid.subString(1, sizeof(sqlUID)-1));
+    strcpy(sqlPWD, pwd.subString(1, sizeof(sqlPWD)-1));
+
+    EXEC SQL CONNECT TO :sqlDB USER :sqlUID USING :sqlPWD;
+    if( !nodeName.length() || nodeName == _HOST_DEFAULT )
+    {
+        nodeName = getenv("DB2INSTANCE");
+        if( !nodeName.length() )  nodeName = "DB2"; //We're guessing here...
+    }
+    if( sqlca.sqlcode  )
+    {
+        iErrCode = sqlca.sqlcode;
+        GString retMsg = "Could not connect: "+GString(sqlca.sqlcode)+": "+sqlError();        
+        #if defined(MAKE_VC) || defined (__MINGW32__)
+        if( iErrCode == -1031 ) retMsg += "\n\n[Hint: Try starting PMF as Administrator]";
+        #else
+        if( iErrCode == -1031 ) retMsg += "\n\n[Hint: Try starting pmf with elevated rights, e.g. as DB2 instance owner]";
+        #endif
+        return retMsg;
+    }
+    //This apparently fucks up the monitor results for dynSQL on remote instances...
+    if( nodeName != "DB2" && nodeName != _HOST_DEFAULT )
+    {
+        sqleatin(nodeName, uid, pwd, &sqlca);
+    }
+    if( sqlca.sqlcode  )
+    {
+        iErrCode = sqlca.sqlcode;
+        tm("Tried to attach to instance "+nodeName+". It failed with error-code "+GString(sqlca.sqlcode)+": "+sqlError());
+        return "Tried to attach to instance "+nodeName+". It failed with error-code "+GString(sqlca.sqlcode)+": "+sqlError();
+    }
+    return "";
+}
+
+int dsqlobj::disconnect()
+{
+    tm("Disconnecting");
+    sqledtin(&sqlca); //Do this regardless of existing connection
+    EXEC SQL CONNECT RESET;
+    return SQLCODE;
+}
+
+void dsqlobj::setAutoCommmit(int commit)
+{
+    iCommit = commit;
+}
+//*************************************************************************
+//*************************************************************************
+//************************ Start DSQL-BLOCK *******************************
+//*************************************************************************
+//*************************************************************************
+GString dsqlobj::initAll(GString message, unsigned long maxLines, int getLen )
+{
+
+    /************
+EXEC SQL PREPARE stat3 FROM :stmt;
+EXEC SQL DECLARE CRS3 CURSOR FOR stat3;
+EXEC SQL PREPARE DSQLSTMT FROM :stat3;
+EXEC SQL DESCRIBE DSQLSTMT INTO :*sqldaptr;
+EXEC SQL OPEN CRS3;
+EXEC SQL FETCH WITH CONTINUE CRS3 INTO :*sqldaptr;
+EXEC SQL CLOSE CRS3;
+************/
+
+    tm("In InitAll. Start. CMD: "+message+", Lines: "+GString(maxLines));
+    //tm("In InitAll. Start. CMD: "+message);
+
+
+    /***************** The HowTo **************************************
+   init_da with 1 column. It will fail, but SQLDA will be filled.
+   PrepareStatement
+   DescribeStatement
+     (watch for Blobs, they need twice the memory)
+   init_da with correct number of Cols
+   DescribeStatement
+   alloc_host_vars
+   declare, open and fetch Cursor
+   free SQLDA
+***************** END ********************************************/
+
+    GRowHdl * pRow;
+    clearAllSequences();
+
+    struct sqlda * sqldaptr = NULL;
+    long erc, maxLen;
+    GString retString = "";
+    iCommandOK = 0;
+    _stopThread = 0;
+    m_pRowAtCrs = NULL;
+    iNumberOfRows = iNumberOfColumns = iCost = iAffectedRows = 0;
+    //Have to clear Main Sequence manually: Objects are created with "new"
+
+    tm("INT: Clearing allRowsSeq....Elements: "+GString(allRowsSeq.numberOfElements()));
+
+
+    tm("INT: ..allRowsSeq Cleared.");
+    tm("SQL: "+message);
+
+
+    if( message == "" ) return "";
+
+
+    unsigned long i;
+
+    //Allocate with one column i.e. init_da(1)
+    tm("INT: Allocating dummy...");
+    if ( init_da(&sqldaptr, 1) ){ iErrCode = sqlca.sqlcode; return "Initial alloc of sqlda failed.";}
+    tm("INT: Dummy allocated.");
+    //if CurrentOfCursor: message += " WHERE CURRENT OF cur";
+    if( message.length() > 32660 )
+    {
+        iErrCode = 1001;
+        return "Length of generated statement ("+GString(message.length())+" bytes) exceeds buffer size!";
+    }
+
+    strcpy(stmt, message);
+    tm("INT: Preparing...");
+    EXEC SQL PREPARE stat1 FROM :stmt;
+    iAffectedRows = sqlca.sqlerrd[2];
+    tm("ERC: "+GString(sqlca.sqlcode)+", Error: "+sqlError()+", p1: AR: "+GString(iAffectedRows));
+    if (sqlca.sqlcode < 0)
+    {
+        iErrCode = sqlca.sqlcode;
+        return "Failed on 1st Prepare. ERC: "+GString(sqlca.sqlcode)+"\n"+sqlError();
+    }
+    iCost = sqlca.sqlerrd[3];
+    tm("INT: Describe...");
+    sqldaptr->sqln=1;
+    EXEC SQL DESCRIBE stat1 INTO :*sqldaptr;
+
+    //Now initialize again....
+    tm("INT: Allocating for real...");
+    short cols = sqldaptr->sqld;
+
+    // We set 2 SQLDAs in case we need one for XML columns:
+    int doubleIt = 1;
+    if( (sqlca.sqlcode > 236 && sqlca.sqlcode < 240) || doubleIt )
+    {
+        cols *= 2; //BLOBS !!
+        erc = init_da(&sqldaptr, cols, 1);
+    }
+    else erc = init_da(&sqldaptr, cols);
+    if( erc ){iErrCode = sqlca.sqlcode; return "Failed to allocate SQLDA.";}
+
+
+    //if sqld is 0 we have (probably) a command.
+    if( sqldaptr->sqld == 0 )
+    {
+        tm("INT: Running as command: "+message);
+        iCommandOK = 1; //Flag: We had a transaction (even if it fails), not a select
+        EXEC SQL EXECUTE stat1;
+        erc = sqlca.sqlcode;
+        tm("INT: erc: "+GString(erc));
+        if( erc < 0 || erc == 100 || erc == 605)
+        {
+            tm("INT: Rolling Back command.");
+            iErrCode = sqlca.sqlcode;
+            GString error = sqlError();
+            if( iCommit ) EXEC SQL ROLLBACK;
+            return "Exec Failed. ERC: "+GString(erc)+"\n"+error;
+        }
+        else
+        {
+            iErrCode = sqlca.sqlcode;
+            if( iCommit ) EXEC SQL COMMIT;
+            tm("INT: Committing command. ERC: "+GString(sqlca.sqlcode));
+            return "";
+        }
+    }
+
+    //OK, it's not a command but maybe a select.
+    tm("INT: Describing again...");
+    if( m_iReadUncommitted )
+    {
+        strcpy(stmt, message+" FOR READ ONLY WITH UR");
+        tm("INT: Preparing for readOnly...");
+        //strcpy(stmt, message+" WITH UR");
+        EXEC SQL PREPARE stat1 FROM :stmt;
+        if (sqlca.sqlcode != 0)
+        {
+            iErrCode = sqlca.sqlcode;
+            if (sqlca.sqlcode < 0) return "PrepForReadOnly failed, ErrCode: "+GString(iErrCode)+": "+sqlError();
+            else retString = "WARNING: SQLCODE "+GString(sqlca.sqlcode)+"\n"+sqlError();
+
+        }
+    }
+    EXEC SQL DESCRIBE stat1 INTO :*sqldaptr;
+    if (sqlca.sqlcode != 0)
+    {
+        iErrCode = sqlca.sqlcode;
+        if (sqlca.sqlcode < 0) return "Describe failed, ErrCode: "+GString(iErrCode)+": "+sqlError();
+        else retString = "WARNING: SQLCODE "+GString(sqlca.sqlcode)+"\n"+sqlError();
+
+    }
+
+    if( alloc_host_vars(sqldaptr) ){iErrCode = sqlca.sqlcode; return "Failed to alloc HostVars. ErrCode: "+GString(iErrCode)+": "+sqlError();}
+
+    iNumberOfColumns = sqldaptr->sqld;
+    //HOSTVARIABLE + LENGTH + INDIKATOR VARIABLE
+    tm("INT: Setting Cols, ColCount "+GString(iNumberOfColumns));
+    for(i=0; i<iNumberOfColumns;++i)
+    {
+        //HostVar
+        hostVarSeq.add(GString(sqldaptr->sqlvar[i].sqlname.data, sqldaptr->sqlvar[i].sqlname.length));
+        sqlvar2 = db2Sqlvar2Convert(sqldaptr);
+        tm("ColName: "+GString(sqldaptr->sqlvar[i].sqlname.data));
+        tm("ColLen: "+GString(sqldaptr->sqlvar[i].sqlname.length));
+        //Length
+        sqlVarLengthSeq.add(sqldaptr->sqlvar[i].sqllen);
+        if( getLen ) sqlLenSeq.add(sqldaptr->sqlvar[i].sqlname.length+1);
+        tm("col: "+GString(i)+", sqlType: "+GString(sqldaptr->sqlvar[i].sqltype));
+    }
+
+    EXEC SQL DECLARE cur1 CURSOR FOR stat1;
+    EXEC SQL OPEN cur1;
+
+    unsigned long lines = 0;
+    if (sqlca.sqlcode ){iErrCode = sqlca.sqlcode; return "Failed to Open Cursor. ERC: "+GString(sqlca.sqlcode)+": "+sqlError();}
+    tm("INT: Starting Lines...Now...");
+
+    DATA_CELL * pCell;
+
+    while (sqlca.sqlcode == 0 && !_stopThread ) //Read all Lines
+    {
+        EXEC SQL FETCH cur1 USING DESCRIPTOR :*sqldaptr;
+        //EXEC SQL FETCH cur1 INTO  :*sqldaptr;
+        if( sqlca.sqlcode ) break;
+        if( iStop ){tm("Received Stop"); break;}
+        if( maxLines > 0 && lines >= maxLines ) break;
+        pRow = new GRowHdl();
+        tm("INT: Starting Lines, for: "+GString(iNumberOfColumns));
+        for(i=0; i<iNumberOfColumns;++i)
+        {
+            pCell = new DATA_CELL;
+            pCell->init();
+            setCellData(pCell, sqldaptr, i);
+            if ( (sqldaptr->sqlvar[i].sqltype & 1) && *(sqldaptr->sqlvar[i].sqlind) < 0 )
+            {
+                pCell->data = "NULL";
+                pCell->isNull = 1;
+            }
+            else if ( pCell->isTruncated )  pCell->data = "[TRUNCATED, right-click to edit]";
+
+            pRow->addElement(pCell);
+            tm("INT:    element added, line: "+GString(lines)+", col: "+GString(i));
+            if( getLen )
+            {
+                maxLen = max((signed) pCell->data.strip("'").strip().length()+1, sqlLenSeq.elementAtPosition(i+1));
+                sqlLenSeq.replaceAt(i+1, maxLen);
+            }
+        }
+        tm("INT:    line fully added, line: "+GString(lines));
+        lines++;
+        allRowsSeq.add( pRow );
+    }
+
+    iNumberOfRows = lines;
+
+    if(sqlca.sqlcode && sqlca.sqlcode != 100)
+    {
+        iErrCode = sqlca.sqlcode;
+        retString = "Sqlcode: "+GString(sqlca.sqlcode)+"\n"+sqlError();
+        tm("SQLCode: " +GString(sqlca.sqlcode));
+    }
+
+    EXEC SQL CLOSE cur1;
+    tm("INT: ...Lines Done. LineCount: "+GString(iNumberOfRows));
+    free_da(sqldaptr);
+    m_strLastSqlSelectCommand = message;
+    //We'll commit even if we've only been reading stuff (to release locks)
+    if( iCommit ) EXEC SQL COMMIT;
+    tm("INT: *************** Ending.");
+    return retString;
+}
+
+void dsqlobj::emptyLVSeq()
+{
+#ifndef NO_QT
+    tm("emptyLVSeq() started, Elements: "+GString(lvItemSeq.numberOfElements()));
+    QListViewItem *lvItem;
+    while( !lvItemSeq.isEmpty() )
+    {
+        lvItem =  lvItemSeq.firstElement();
+        lvItemSeq.removeFirst();
+        //     delete lvItem;
+    }
+    tm("...emptyLVSeq Done.");
+#endif
+}
+
+
+
+short dsqlobj::init_da(struct sqlda **sqldaptr, short cols, short lobs)
+{
+    //return 0: OK
+    //return 1: Allocate failed.
+
+    //Free previously allocated sqldaptr and allocate new one
+    //with correct Number Of Columns.
+    if( *sqldaptr ) free(*sqldaptr);
+    if ((*sqldaptr = (struct sqlda *)malloc(SQLDASIZE(cols))) == NULL) return 1;
+    strncpy((*sqldaptr)->sqldaid, "SQLDA   ", sizeof((*sqldaptr)->sqldaid));
+    if( lobs ) SETSQLDOUBLED(*sqldaptr, SQLDOUBLED);
+    (*sqldaptr)->sqldabc = (long) SQLDASIZE(cols);
+
+    (*sqldaptr)->sqln = cols;
+    (*sqldaptr)->sqld = cols;
+
+    return 0;
+}
+
+void dsqlobj::free_da(struct sqlda * sqldaptr)
+{
+    tm("Freeing sqlda...");
+    for( short i = 0; i < sqldaptr->sqld; ++i )
+    {
+        free (sqldaptr->sqlvar[i].sqlind);
+        if( !isXMLCol(i+1) ) free (sqldaptr->sqlvar[i].sqldata);
+        /* OLD
+        if( sqldaptr->sqlvar[i].sqldata && sqldaptr->sqlvar[i].sqldata[0] && sqldaptr->sqlvar[i].sqllen > 0) free (sqldaptr->sqlvar[i].sqldata);
+        //if( sqldaptr->sqlvar[i].sqllen > 0 || sqldaptr->sqlvar[i].sqltype == 409) free (sqldaptr->sqlvar[i].sqldata);
+        if( sqldaptr->sqlvar[i].sqltype & 1 ) free (sqldaptr->sqlvar[i].sqlind);
+        */
+    }
+    free (sqldaptr);
+    tm("Freeing sqlda...OK");
+}
+
+
+long dsqlobj::setSqldaToLOB(struct sqlda* sqldaptr, short idx, int lobType)
+{
+    unsigned int memsize = 0;
+    int displayClear = 0;
+    long longmemsize = GETSQLDALONGLEN(sqldaptr, idx);
+    if( m_iReadCLOBs && longmemsize < 10000000 )
+    {
+        if( sqldaptr->sqlvar[idx].sqltype == SQL_TYP_CLOB || sqldaptr->sqlvar[idx].sqltype == SQL_TYP_NCLOB  )
+        {
+            displayClear = 1;
+        }
+    }
+
+    if( displayClear )
+    {
+#ifdef MAKE_VC
+        memsize = (unsigned int) (min(longmemsize, 64000));
+        SETSQLDALONGLEN(sqldaptr, idx, memsize);
+#else
+        memsize = longmemsize;
+#endif
+        if( longmemsize == 2147483647 )
+        {
+            memsize = (unsigned int) (min(longmemsize, 64000));
+            SETSQLDALONGLEN(sqldaptr, idx, memsize);
+        }
+        else memsize = longmemsize;
+        SETSQLDALONGLEN(sqldaptr, idx, memsize);
+        sqldaptr->sqlvar[idx].sqldata = (char *SQL_POINTER) malloc (memsize+1);
+    }
+    else
+    {
+        sqldaptr->sqlvar[idx].sqltype = lobType;
+        sqldaptr->sqlvar[idx].sqllen = 4;
+        sqldaptr->sqlvar[idx].sqlind = 0L;
+        sqldaptr->sqlvar[idx].sqldata = (char *SQL_POINTER) malloc (267);
+        memsize = 267;
+    }
+    return memsize;
+}
+int dsqlobj::alloc_host_vars (struct sqlda* sqldaptr)
+{
+
+    short idx;
+    unsigned int memsize =0;
+    unsigned long longmemsize;
+    int precision  =0;
+
+    simpleColTypeSeq.removeAll();
+
+    tm("in alloc_hostVars, cols: "+GString(sqldaptr->sqld));
+    for (idx = 0; idx < sqldaptr->sqld; idx++)
+    {
+        tm("in alloc_hostVar, col "+GString(idx)+", Type: "+GString(sqldaptr->sqlvar[idx].sqltype));
+        //When sqldatata == NULL, the column is defined as "FOR BIT".
+        //We first add 0 to the sequence and overwrite this where necessary
+        sqlForBitSeq.add(0);
+        sqlLongTypeSeq.add(0);
+
+       //Types
+        sqlTypeSeq.add(sqldaptr->sqlvar[idx].sqltype);
+        //Odd sqltype means nullable
+        if (sqldaptr->sqlvar[idx].sqltype % 2 ) sqlIndVarSeq.add( 1 );
+        else sqlIndVarSeq.add( 0 );
+
+
+        switch (sqldaptr->sqlvar[idx].sqltype )
+        {
+        case SQL_TYP_CLOB:
+        case SQL_TYP_NCLOB:
+            tm("Is CLOB, readCLOB: "+GString(m_iReadCLOBs));
+            memsize = setSqldaToLOB(sqldaptr, idx, SQL_TYP_NCLOB_LOCATOR);
+            simpleColTypeSeq.add(CT_CLOB);
+            break;
+
+
+        case SQL_TYP_BLOB:
+        case SQL_TYP_NBLOB:
+            tm("Is BLOB, readCLOB: "+GString(m_iReadCLOBs));
+            memsize = setSqldaToLOB(sqldaptr, idx, SQL_TYP_NBLOB_LOCATOR);
+            simpleColTypeSeq.add(CT_BLOB);
+            break;
+
+        case SQL_TYP_XML:
+        case SQL_TYP_NXML:
+            tm("Is XML");
+            ///SETSQLSUBTYPE(sqldaptr, idx, 1); //mark it as XML (apparently not necessary here)
+            sqldaptr->sqlvar[idx].sqllen = 0;
+            memsize = XML_MAX;
+            xmlblob.length = memsize;
+            //sqldaptr->sqlvar[idx].sqldata = (char *SQL_POINTER) &xmlblob;
+            sqldaptr->sqlvar[idx].sqldata = (char *SQL_POINTER) malloc(memsize+1);
+
+
+            //Setting sqldatalen ptr to NULL indicates that the length information is not stored
+            //in the extended SQLDA but in the first 4 bytes of the base SQLDA:
+            SETSQLDALENPTR(sqldaptr, idx, NULL);
+            sqldaptr->sqlvar[idx].sqltype = 405; //i.e. XML AS BLOB
+            SETSQLDALONGLEN(sqldaptr, idx, memsize);
+            simpleColTypeSeq.add(CT_XML);
+            break;
+
+
+            /*************************** This could potentially require LOTS of memory (2GB)
+              case SQL_TYP_BLOB:
+              case SQL_TYP_NBLOB:
+              case SQL_TYP_CLOB:
+              case SQL_TYP_NCLOB:
+              case SQL_TYP_DBCLOB:
+              case SQL_TYP_NDBCLOB:
+
+              case SQL_TYP_XML:
+              case SQL_TYP_NXML:
+
+              longmemsize = GETSQLDALONGLEN(sqldaptr, idx);
+
+               #ifdef MAKE_VC
+                 memsize = (unsigned int) (min(longmemsize, 64000));
+                 SETSQLDALONGLEN(sqldaptr, idx, memsize);
+               #else
+                 memsize = longmemsize;
+               #endif
+                 if( longmemsize == 2147483647 )
+                 {
+                     memsize = (unsigned int) (min(longmemsize, 64000));
+                     SETSQLDALONGLEN(sqldaptr, idx, memsize);
+                 }
+                 else memsize = longmemsize;
+                 sqldaptr->sqlvar[idx].sqldata = (char *SQL_POINTER) malloc (memsize);
+                   tm("is LOB, size: "+GString(memsize));
+                 break;
+                ***********************/
+        case SQL_TYP_VARCHAR:
+        case SQL_TYP_NVARCHAR:
+        case SQL_TYP_CHAR:
+        case SQL_TYP_NCHAR:
+        case SQL_TYP_CSTR:
+        case SQL_TYP_NCSTR:
+            // sqldatata == NULL: Column is defined as "FOR BIT".
+            if( (sqldaptr->sqlvar[idx].sqldata == NULL || sqldaptr->sqlvar[idx].sqldata == (char*)0xffff) && m_iCharForBit )
+            {
+                tm("setting charForBit to "+GString(m_iCharForBit));
+                sqlForBitSeq.replaceAt(idx+1, m_iCharForBit);
+                if( sqldaptr->sqlvar[idx].sqltype == SQL_TYP_VARCHAR  || sqldaptr->sqlvar[idx].sqltype == SQL_TYP_NVARCHAR) sqldaptr->sqlvar[idx].sqltype = SQL_TYP_NVARCHAR;
+                else sqldaptr->sqlvar[idx].sqltype = SQL_TYP_NCSTR;
+            }
+            else sqldaptr->sqlvar[idx].sqltype = SQL_TYP_NCSTR;
+            memsize = (sqldaptr->sqlvar[idx].sqllen);
+            sqldaptr->sqlvar[idx].sqldata = (char *SQL_POINTER) malloc (memsize+1);
+
+            //LONG, CHAR and VARCHAR can be rather large (32k), so we'll truncate data when we read it.
+            if( sqldaptr->sqlvar[idx].sqllen > m_iTruncationLimit ) sqlLongTypeSeq.replaceAt(idx+1, 1);
+            tm("is nCHAR, len: "+GString(sqldaptr->sqlvar[idx].sqllen)+", truncLimit: "+GString(m_iTruncationLimit));
+            simpleColTypeSeq.add(CT_STRING);
+            break;
+
+        case SQL_TYP_DECFLOAT:
+        case SQL_TYP_NDECFLOAT:
+            sqldaptr->sqlvar[idx].sqltype = SQL_TYP_NCSTR;
+            memsize = (sqldaptr->sqlvar[idx].sqllen);
+            sqldaptr->sqlvar[idx].sqldata = (char *SQL_POINTER) malloc (memsize+1);
+            if( sqldaptr->sqlvar[idx].sqllen > m_iTruncationLimit ) sqlLongTypeSeq.replaceAt(idx+1, 1);
+            tm("is DECFLOAT, len: "+GString(sqldaptr->sqlvar[idx].sqllen)+", truncLimit: "+GString(m_iTruncationLimit));
+            simpleColTypeSeq.add(CT_STRING);
+            break;
+
+
+        case SQL_TYP_DATE:
+        case SQL_TYP_NDATE:
+        case SQL_TYP_TIME:
+        case SQL_TYP_NTIME:
+        case SQL_TYP_STAMP:
+        case SQL_TYP_NSTAMP:
+            sqldaptr->sqlvar[idx].sqltype = SQL_TYP_NCSTR;
+            sqldaptr->sqlvar[idx].sqldata = (char *SQL_POINTER) malloc ((sqldaptr->sqlvar[idx].sqllen+1));
+            memsize = (sqldaptr->sqlvar[idx].sqllen);
+            tm("is DATE");
+            simpleColTypeSeq.add(CT_DATE);
+            break;
+
+        case SQL_TYP_LONG:
+        case SQL_TYP_NLONG:
+            sqlLongTypeSeq.replaceAt(idx+1, 1);
+            if( m_iGetResultAsHEX )sqldaptr->sqlvar[idx].sqltype = SQL_TYP_VARCHAR; //Read as binary
+            else sqldaptr->sqlvar[idx].sqltype = SQL_TYP_NCSTR; //cast to string
+            //if( m_iTruncationLimit > 0 ) sqldaptr->sqlvar[idx].sqltype = SQL_TYP_NCSTR;
+            //else sqldaptr->sqlvar[idx].sqltype = SQL_TYP_VARCHAR;
+            sqldaptr->sqlvar[idx].sqldata = (char *SQL_POINTER) malloc ((sqldaptr->sqlvar[idx].sqllen+1));
+            memsize = (sqldaptr->sqlvar[idx].sqllen);
+            tm("is LONG xCHAR");
+            simpleColTypeSeq.add(CT_LONG);
+            break;
+
+
+
+        case SQL_TYP_DECIMAL:
+        case SQL_TYP_NDECIMAL:
+            precision = ((char *)&(sqldaptr->sqlvar[idx].sqllen))[0];
+            sqldaptr->sqlvar[idx].sqldata = (char *SQL_POINTER)
+            malloc ((precision + 2) /2);
+            memsize = (precision +2) /2;
+            tm("is Decimal");
+            simpleColTypeSeq.add(CT_DECIMAL);
+            break;
+
+
+        case SQL_TYP_VARGRAPH:
+        case SQL_TYP_NVARGRAPH:
+        case SQL_TYP_GRAPHIC:
+        case SQL_TYP_NGRAPHIC:
+        case SQL_TYP_LONGRAPH:
+        case SQL_TYP_NLONGRAPH:
+            memsize = (sqldaptr->sqlvar[idx].sqllen)*2;
+            sqldaptr->sqlvar[idx].sqldata = (char *SQL_POINTER) malloc (memsize+1);
+            simpleColTypeSeq.add(CT_GRAPHIC);
+            break;
+
+        case SQL_TYP_DBCLOB:
+        case SQL_TYP_NDBCLOB:
+            //memsize = (sqldaptr->sqlvar[idx].sqllen)*2;
+            //sqldaptr->sqlvar[idx].sqldata = (char *SQL_POINTER) malloc (memsize);
+            simpleColTypeSeq.add(CT_DBCLOB);
+            //simpleColTypeSeq.add(CT_BLOB);
+            longmemsize = GETSQLDALONGLEN(sqldaptr, idx);
+
+#ifdef MAKE_VC
+            memsize = (unsigned int) (min(longmemsize, 64000));
+            SETSQLDALONGLEN(sqldaptr, idx, memsize);
+#else
+            memsize = longmemsize;
+#endif
+            if( longmemsize == 2147483647 )
+            {
+                memsize = (unsigned int) (min(longmemsize, 64000));
+                SETSQLDALONGLEN(sqldaptr, idx, memsize);
+            }
+            else memsize = longmemsize;
+            memsize = (unsigned int) (min(longmemsize, 64000));
+            sqldaptr->sqlvar[idx].sqldata = (char *SQL_POINTER) malloc (memsize+1);
+            //!!memsize = setSqldaToLOB(sqldaptr, idx, SQL_TYP_NDBCLOB_LOCATOR);
+            break;
+
+        case SQL_TYP_FLOAT:
+        case SQL_TYP_NFLOAT:
+            precision = ((char *)&(sqldaptr->sqlvar[idx].sqllen))[0];
+            sqldaptr->sqlvar[idx].sqldata = (char *SQL_POINTER) malloc (sqldaptr->sqlvar[idx].sqllen+1);
+            memsize = sqldaptr->sqlvar[idx].sqllen;
+            tm("is Float");
+            simpleColTypeSeq.add(CT_FLOAT);
+            break;
+
+
+        case SQL_TYP_INTEGER:
+        case SQL_TYP_NINTEGER:
+        case SQL_TYP_BIGINT:
+        case SQL_TYP_NBIGINT:
+        case SQL_TYP_SMALL:
+        case SQL_TYP_NSMALL:
+            sqldaptr->sqlvar[idx].sqldata = (char *SQL_POINTER)  malloc (sqldaptr->sqlvar[idx].sqllen+1);
+            memsize = sqldaptr->sqlvar[idx].sqllen;
+            simpleColTypeSeq.add(CT_INTEGER);
+            break;
+
+        default:
+            tm("sqltype at "+GString(idx)+": "+GString(sqldaptr->sqlvar[idx].sqltype)+", defaulting.");
+            sqldaptr->sqlvar[idx].sqldata = (char *SQL_POINTER)  malloc (sqldaptr->sqlvar[idx].sqllen+1);
+            memsize = sqldaptr->sqlvar[idx].sqllen;
+            simpleColTypeSeq.add(CT_UNKNOWN);
+            break;
+        }
+        if (sqldaptr->sqlvar[idx].sqldata == NULL) return 1;
+        else memset (sqldaptr->sqlvar[idx].sqldata,'\0',memsize);
+
+        if ( sqldaptr->sqlvar[idx].sqltype & 1 )
+        {
+            tm("sqltype & 1 set");
+            sqldaptr->sqlvar[idx].sqlind = (short *)malloc(sizeof(short));
+            if ( sqldaptr->sqlvar[idx].sqlind == NULL ) return 2;
+            //!!?? memset(sqldaptr->sqlvar[idx].sqldata,'\0',sizeof(short));
+            memset(sqldaptr->sqlvar[idx].sqlind,'\0',sizeof(short));
+        }
+    }
+    //We need to set SETSQLDOUBLED(sqldaptr, SQLDOUBLED) after EXEX SQL DESCRIBE when XML colums are present.
+    //Calling EXEC SQL DESCRIBE stat1 INTO ... resets the doubled SQLDA when no LOBs are present. Nasty. So we force it here:
+    for(int i=0; i < sqldaptr->sqld; ++i)
+    {
+        if( isXMLCol(i+1) )
+        {
+            SETSQLDOUBLED(sqldaptr, SQLDOUBLED);
+            break;
+        }
+    }
+
+    return 0;
+}
+
+
+void dsqlobj::convToSQL( GString& input )
+{
+    //Strings containing ' have to be converted.
+    //Example: input = 'aString 'with' this'
+    //Output should be: 'aString ''with'' this'
+    GString output = "";
+    unsigned long i;
+    if( input.occurrencesOf('\'') <= 2 ) return;
+    input = input.strip();
+    if( input[1] == '\'' && input[input.length()] == '\'')input = input.subString(2, input.length()-2);
+
+    char * in = new char[input.length() + 1];
+    strcpy( in, (char*) input );
+
+    for(i=0;i < input.length();++i)
+    {
+        if( in[i] == '\'' ) output = output + GString(in[i]) + "'";
+        else output = output + GString(in[i]);
+
+        //     if( GString(input[i]) == GString('\'') ) output = output + GString(input[i])+"'";
+        //     else output = output + GString(input[i]);
+    }
+    output = "'"+output+"'";
+    input = output;
+    delete [] in;
+}
+GString dsqlobj::setFldData(struct sqlda* sqldaptr, short col )
+{
+    DATA_CELL aCell;
+    setCellData(&aCell, sqldaptr, col);
+    return aCell.data;
+}
+void dsqlobj::setCellData(DATA_CELL*pCell, struct sqlda* sqldaptr, short col )
+{
+
+    tm("setFldData start, col: "+GString(col));
+    short sqlType = sqldaptr->sqlvar[col].sqltype;
+
+    //   short i;
+    short isTruncated = 0;
+    short isBinary = 0;
+    short negativeDecimal = 0;
+    short* shortPtr;
+    GString fldData;
+
+    int length, precision;
+    long*  longPtr;
+    int * intPtr;
+    double* doublePtr;
+    int64_t *long64Ptr;
+
+
+    //Does not work: int maxRead = max( MAX_DATA_READ, sqldaptr->sqlvar[col].sqllen);
+    int maxRead = 0;
+    switch( sqlType )
+    {
+    case SQL_TYP_INTEGER:
+    case SQL_TYP_NINTEGER:
+        tm("setFldData (2) 497");
+        intPtr = (int*) sqldaptr->sqlvar[col].sqldata;
+        fldData = GString(*intPtr);
+        break;
+
+    case SQL_TYP_BIGINT:
+    case SQL_TYP_NBIGINT:
+        tm("setFldData (2) 492");
+        //substForLong =(int)  *(sqldaptr->sqlvar[col].sqldata);
+        //fldData = GString(substForLong);
+        long64Ptr = (int64_t*) sqldaptr->sqlvar[col].sqldata;
+        //fldData = GString(*long64Ptr);
+        //printf("dsql Raw: %I64d\n", *long64Ptr);
+        //fldData = GString((int64_t) *sqldaptr->sqlvar[col].sqldata);
+        fldData = GString(*long64Ptr);
+        break;
+
+    case SQL_TYP_FLOAT:
+    case SQL_TYP_NFLOAT:
+        tm("setFldData (2) 480");
+        doublePtr = (double*) sqldaptr->sqlvar[col].sqldata;
+        precision = ((char *)&(sqldaptr->sqlvar[col].sqllen))[0];
+        tm("precision: "+GString(precision));
+        //dbl = *(sqldaptr->sqlvar[col].sqldata);
+
+        fldData = GString(*doublePtr, precision).strip();
+
+        fldData.translate(',', '.');
+
+        /*
+
+
+            floatPtr = (float*) sqldaptr->sqlvar[col].sqldata;
+            fldData = GString((float) *doublePtr);
+            fldData.translate(',', '.');
+*/
+        break;
+
+    case SQL_TYP_SMALL:
+    case SQL_TYP_NSMALL:
+        tm("setFldData (2) 500");
+        //shrt = *(sqldaptr->sqlvar[col].sqldata);
+        //fldData = GString(shrt);
+        shortPtr = (short*) sqldaptr->sqlvar[col].sqldata;
+        fldData = GString(*shortPtr);
+        break;
+
+        /********** LONG gets casted to NCSTRING (in ::alloc_host_vars)
+       case SQL_TYP_LONG:  //457
+       case SQL_TYP_NLONG:
+            tm("setFldData type 457");
+            fldData = GString(sqldaptr->sqlvar[col].sqldata, sqldaptr->sqlvar[col].sqllen);
+            fldData.sayIt();
+            if( sqlLongTypeSeq.elementAtPosition(col+1) == 1 )
+         1   {
+                printf("Col %i is LONG\n", col);
+                fldData = GString(sqldaptr->sqlvar[col].sqldata, 10);
+
+                x = fldData.isUTF8();
+                printf("---->Col %i data: %s, isUTF8: %i\n", col, (char*) fldData, x);
+                if( !x ) fldData = "<BinaryData>";
+            }
+            break;
+ ************************/
+    case SQL_TYP_LONG:  //457
+    case SQL_TYP_NLONG:
+    case SQL_TYP_CSTR:
+    case SQL_TYP_NCSTR:
+    case SQL_TYP_CHAR:
+    case SQL_TYP_NCHAR:
+    case SQL_TYP_VARCHAR:
+    case SQL_TYP_NVARCHAR:
+        tm("setFldData (2) LONG/CHAR/VARCHAR....");
+        fldData = GString(sqldaptr->sqlvar[col].sqldata, sqldaptr->sqlvar[col].sqllen);
+        tm("sqlForBitSeq.elementAtPosition: "+GString(sqlForBitSeq.elementAtPosition(col+1)));
+        //tm("FldDataLen: "+GString((int)strlen(sqldaptr->sqlvar[col].sqldata)));
+
+        if( m_iTruncationLimit > 0 && (int)fldData.length() > m_iTruncationLimit  )
+        {
+            maxRead = m_iTruncationLimit;
+            isTruncated = 1;
+        }
+
+        //Larger CHAR FOR BIT columns need to be casted to NVARCHAR (see alloc_hostvars).
+        //We cast this to loc_varchar, the first 2 bytes will hold length info.
+        //GString(HEX) will create a buffer twice the length
+        if( ( sqlLongTypeSeq.elementAtPosition(col+1)==1 && isTruncated)
+                || sqlForBitSeq.elementAtPosition(col+1) == DATA_HEX
+                || m_iGetResultAsHEX
+                || sqlForBitSeq.elementAtPosition(col+1) == DATA_AUTO)
+        {
+            tm("Not UTF8 && isLongTyp OR sqlForBit --> giving as HEX");
+            isBinary = 1;
+            //
+            if( sqlType == SQL_TYP_VARCHAR || sqlType ==  SQL_TYP_NVARCHAR )
+            {
+                length = ((struct loc_varchar *) (sqldaptr->sqlvar[col].sqldata))->length;
+                tm("Len1: "+GString(length));
+                fldData = GString((char*) ((char*)(sqldaptr->sqlvar[col].sqldata)+2), length, GString::HEX);
+            }
+            else fldData = GString(sqldaptr->sqlvar[col].sqldata, sqldaptr->sqlvar[col].sqllen, GString::HEX); //.stripTrailing("00");
+
+        }
+        //else if(!fldData.isSomewhatPrintable(1) )  fldData = "[Binary, right-click to edit]";
+        //tm("FldData: "+fldData.stripTrailing('0'));
+        tm("FldDataLng: "+GString(fldData.length()));
+
+        tm("setFldData type 460, maxRead: "+GString(maxRead)+", varLen: "+GString(sqldaptr->sqlvar[col].sqllen));
+        tm("CharForBitMode: "+GString(m_iCharForBit)+", sqlForBitSeq.elementAtPosition "+GString(col+1)+": "+GString(sqlForBitSeq.elementAtPosition(col+1)));
+
+        if( sqlForBitSeq.elementAtPosition(col+1) == DATA_HIDE ) fldData = "@DSQL@CHAR_AS_BIT";
+        if( iEmbrace ) fldData = "'" + fldData + "'";
+        break;
+
+    case SQL_TYP_BLOB:
+    case SQL_TYP_NBLOB:
+        tm("setFldData (2) BLOB");
+        //if( xmlSeq.elementAtPosition(col+1) == 1 )fldData = "@DSQL@ XML";
+        //else fldData = "@DSQL@ BLOB";
+        /*** Show first n chars */
+        if( isXMLCol(col+1) == 1 )
+        {
+            lobPointer = (struct lob *) sqldaptr->sqlvar[col].sqldata;
+            //printf("Size: %i\n", lobPointer->length);
+            //Works too: fldData =sqldaptr->sqlvar[col].sqldata+4;
+            fldData = GString(sqldaptr->sqlvar[col].sqldata+4, XML_MAX);
+            //memmove(&xmlblob, sqldaptr->sqlvar[col].sqldata, XML_MAX);
+            //fldData = GString(xmlblob.data, XML_MAX);
+        }
+        //printf("col: %i, is BLOB(2), fldData: %s\n", col, (char*) fldData);
+        break;
+
+    case SQL_TYP_CLOB:
+    case SQL_TYP_NCLOB:
+        tm("setFldData (2) CLOB");
+        //CLOB: Show first XML_MAX chars if size allows it
+        if( isXMLCol(col+1) == 1 )fldData = "@DSQL@ XML";
+        else fldData = "@DSQL@ CLOB";
+        //fldData = GString(sqldaptr->sqlvar[col].sqldata, sqldaptr->sqlvar[col].sqllen);
+        //fldData = GString(sqldaptr->sqlvar[col].sqldata, 20);
+        longPtr = (long *)GETSQLDALENPTR(sqldaptr, col);
+        if (longPtr == NULL)
+        {
+            length = ((struct lob *) (sqldaptr->sqlvar[col].sqldata))->length;
+            tm("ClobLen(1): "+GString(length));
+        }
+        else length = *longPtr;
+        tm("ClobLen(2): "+GString(length));
+        if( length <= XML_MAX ) fldData = GString((char*) ((char*)(sqldaptr->sqlvar[col].sqldata)+4), length);
+        else fldData = "@DSQL@ CLOB";
+        //printf("col: %i, is CLOB, fldData: %s\n", col, (char*) fldData);
+        break;
+
+    case SQL_TYP_DBCLOB:
+    case SQL_TYP_NDBCLOB:
+        fldData = "@DSQL@DBCLOB";
+        fldData = readGraphicData(sqldaptr, col, 2);
+        longPtr = (long *)GETSQLDALENPTR(sqldaptr, col);
+        if (longPtr == NULL)
+        {
+            length = ((struct lob *) (sqldaptr->sqlvar[col].sqldata))->length;
+            tm("Len: "+GString(length));
+        }
+        else length = *longPtr;
+        //if( length <= 64000 )
+        if( m_iReadCLOBs )
+        {
+            fldData = GString((char*) ((char*)(sqldaptr->sqlvar[col].sqldata)+4), length);
+            fldData = readGraphicData(sqldaptr, col, 2);
+        }
+        else fldData = "@DSQL@ DBCLOB";
+
+
+        break;
+
+    case SQL_TYP_DECIMAL:
+    case SQL_TYP_NDECIMAL:
+        tm("setFldData (2) 485");
+        int p, s, ind, idx, top, bottom, point;
+        char* ptr;
+        p = ( (char *)&(sqldaptr->sqlvar[col].sqllen) )[0];
+        s = ( (char *)&(sqldaptr->sqlvar[col].sqllen) )[1];
+        ptr = sqldaptr->sqlvar[col].sqldata;
+        if ((p %2) == 0) p += 1;
+        idx = ( p + 2 ) / 2 ; //Number Of Bytes
+        point = p - s ;       //Where the point is ...
+        //Determine the sign
+        bottom = *(ptr + idx -1) & 0x000F ;
+        if ( (bottom == 0x000D) || (bottom == 0x000B) ) negativeDecimal = 1;
+        else negativeDecimal = 0;
+
+
+        for (ind=0; ind < idx; ind++)
+        {
+            top = *(ptr + ind) & 0x00F0 ;
+            top = (top >> 4 ) ;
+            bottom = *(ptr + ind) & 0x000F ;
+            if ( point-- == 0 ) fldData += ".";
+            fldData += GString(top);
+            if ( ind < idx - 1 )
+            { /* sign half byte ? */
+                if ( point-- == 0 ) fldData += ".";
+                fldData += GString(bottom);
+            }
+        }
+        if ( s == 0 ) fldData += ".";
+        fldData = fldData.stripLeading('0');
+        if( fldData.length() == 0) fldData = "0";
+        else if( fldData[1] == '.') fldData = "0"+fldData;
+        if( negativeDecimal ) fldData = "-"+fldData;
+
+
+        /*
+            for (ind=0; ind < idx; ind++)
+            {
+               top = *(ptr + ind) & 0x00F0 ;
+               top = (top >> 4 ) ;
+               bottom = *(ptr + ind) & 0x000F ;
+               fldData += GString(top);
+               if ( ind < idx - 1 ) fldData += GString(bottom);
+            }
+            fldData.insert(GString("."), point+1);
+            */
+        break;
+
+    case SQL_TYP_GRAPHIC:
+    case SQL_TYP_NGRAPHIC:
+        tm("setFldData (2) GRAPH");
+        fldData = readGraphicData(sqldaptr, col, 0);
+        break;
+
+    case SQL_TYP_VARGRAPH:
+    case SQL_TYP_NVARGRAPH:
+    case SQL_TYP_LONGRAPH:
+    case SQL_TYP_NLONGRAPH:
+        tm("setFldData (2) VARGRAPH");
+        fldData = readGraphicData(sqldaptr, col, 1);
+        break;
+
+
+#ifdef SQLM_DBMON_VERSION7
+    case SQL_TYP_BLOB_FILE_OBSOLETE:
+    case SQL_TYP_NBLOB_FILE_OBSOLETE:
+    case SQL_TYP_CLOB_FILE_OBSOLETE:
+    case SQL_TYP_NCLOB_FILE_OBSOLETE:
+    case SQL_TYP_DBCLOB_FILE_OBSOLETE:
+    case SQL_TYP_NDBCLOB_FILE_OBSOLETE:
+#endif
+    case SQL_TYP_BLOB_FILE:
+    case SQL_TYP_NBLOB_FILE:
+    case SQL_TYP_CLOB_FILE:
+    case SQL_TYP_NCLOB_FILE:
+    case SQL_TYP_DBCLOB_FILE:
+    case SQL_TYP_NDBCLOB_FILE:
+        tm("setFldData (2) LOBFILE");
+        fldData = "@DSQL@BLOB";
+        break;
+
+    case SQL_TYP_BLOB_LOCATOR:
+    case SQL_TYP_NBLOB_LOCATOR:
+        tm("setFldData (2) BLOBLOC");
+        fldData = "@DSQL@BLOB";
+        break;
+
+    case SQL_TYP_CLOB_LOCATOR:
+    case SQL_TYP_NCLOB_LOCATOR:
+        tm("setFldData (2) CLOBLOC");
+        fldData = "@DSQL@CLOB";
+        break;
+
+    case SQL_TYP_DBCLOB_LOCATOR:
+    case SQL_TYP_NDBCLOB_LOCATOR:
+        tm("setFldData (2) DBCLOBLOC");
+        fldData = "@DSQL@DBCLOB";
+        break;
+        /*
+        case SQL_TYP_LONG:
+        case SQL_TYP_NLONG:
+            if( sqlLongTypeSeq.elementAtPosition(col+1) == 1 ) fldData = GString(sqldaptr->sqlvar[col].sqldata, 10);
+            else fldData = GString(sqldaptr->sqlvar[col].sqldata, sqldaptr->sqlvar[col].sqllen);
+            if( !fldData.isUTF8() ) fldData = "<BinaryData>";
+            tm("type is LONG");
+            break;
+ */
+    default:
+        fldData = "Unknown SQLDataType: "+GString(sqlType);
+    }
+    tm("setFldData (2) Done.");
+    pCell->data = fldData;
+    pCell->isBinary = isBinary;
+    pCell->isTruncated = isTruncated;
+}
+/******************************************************
+ *
+ * offset: Should be 1 for VARGRAPHIC: First double-byte contains size info
+ * Should be 0 for GRAPHIC: No len info at beginning. Not that this is documented.
+ *
+ * ***************************************************/
+
+GString dsqlobj::readGraphicData(struct sqlda* sqldaptr, short col, int offset)
+{
+
+    return this->readGraphicDataExp(sqldaptr, col, offset);
+
+    if( sqlForBitSeq.elementAtPosition(col+1) == DATA_HIDE ) return "@DSQL@GRAPHIC";
+
+    GString out;
+    char singleChar[2];
+    //wchar_t singleChar[6] = L"";
+    /*
+    unsigned int u;
+    wchar_t to[6]=L"";
+
+    iconv_t conv = iconv_open("UTF-8","UTF-16");
+    char dst[100];
+    char * pIn;
+    char * pOut = ( char*)dst;
+    size_t srclen;
+    size_t dstlen;
+*/
+    GString x;
+#ifdef QT4_DSQL
+    QString q;
+#endif
+    unsigned char c;
+    int length = -1;
+    //We have size info in the first byte (VARGRAPHIC). For GRAPHIC, we break at data == 0
+    if( offset == 1 ) length = ((struct loc_varchar *) (sqldaptr->sqlvar[col].sqldata))->length;
+    else length = (sqldaptr)->sqlvar[col].sqllen;
+    //printf("DataLen: %i\n", length);
+
+    for ( short i = offset ; i < length+offset ; i++ )
+    {
+        if ( *( (sqldbchar *) (sqldaptr)->sqlvar[col].sqldata + (i) ) == 0 ){printf("Breaking\n");  break;}
+        else
+        {
+            //if( offset == 1 && length > 0) x = GString(((struct loc_varchar *) (sqldaptr->sqlvar[col].sqldata))->data, length, GString::DBCS);
+
+            sprintf( singleChar, "%x", *( (sqldbchar *) (sqldaptr)->sqlvar[col].sqldata + i ) ) ;
+            //printf("fldData(1) at %i (HEX): %s\n", i, (char*)singleChar);
+
+            if( GString(singleChar).subString(3,2) != "00")
+            {
+#ifdef QT4_DSQL
+                q += "["+QString(singleChar)+"]";
+#else
+                out += "["+GString(singleChar)+"]";
+#endif
+            }
+            else
+            {
+                x = GString(singleChar).subString(1,2).upperCase();
+                c = (int)strtol(x, NULL, 16);
+#ifdef QT4_DSQL
+                q += QChar(c);
+#else
+                out += GString((char(c)));
+#endif
+            }
+            //printf("loop %i, cInt: %i, c: %c, x: %s\n", i, c, (char)c, (char*) x);
+            //out += GString((char)c);
+
+
+            /*
+            sscanf(singleChar, "%S", to);
+
+            pIn = (char*)to;
+            srclen = (wcslen(to) + 1 ) * sizeof(wchar_t);;
+            dstlen = 2;
+            iconv(conv, &pIn, &srclen, &pOut, &dstlen);
+            printf("CHAR pOut: %s, dst: %s\n", pOut, dst);
+
+
+
+
+
+            swscanf( to, L"%2hx", &u);
+            printf("fldData at %i (HEX): %s, char: %c\n", i, (char*)singleChar, (char) u);
+            //out += (char)+u;
+*/
+        }
+    }
+
+    /*
+    pIn = out;
+    srclen = out.length();
+    dstlen = out.length();
+    iconv(conv, &pIn, &srclen, &pOut, &dstlen);
+    iconv_close(conv);
+    printf("pOut: %s, dst: %s\n", pOut, dst);
+*/
+#ifdef QT4_DSQL
+    return "'"+q+"'";
+#endif
+    return out;
+}
+
+GString dsqlobj::readGraphicDataExp(struct sqlda* sqldaptr, short col, int offset)
+{
+
+
+    if( sqlForBitSeq.elementAtPosition(col+1) == DATA_HIDE ) return "@DSQL@GRAPHIC";
+
+    GString out;
+    wchar_t wc;
+    int ic;
+    setlocale(LC_ALL, "");
+
+
+    short i;
+    int length = -1;
+    //We have size info in the first byte (VARGRAPHIC). For GRAPHIC, we break at data == 0
+    if( offset >= 1 ) length = ((struct loc_varchar *) (sqldaptr->sqlvar[col].sqldata))->length;
+    else length = (sqldaptr)->sqlvar[col].sqllen;
+
+    wchar_t* wcBuf = new wchar_t[(length+1)*sizeof(wchar_t)];
+    tm("readGraphicDataExp, offset: "+GString(offset)+", len: "+GString(length));
+
+    for ( i = offset ; i < length+offset ; i++ )
+    {
+        if ( *( (sqldbchar *) (sqldaptr)->sqlvar[col].sqldata + (i) ) == 0  && offset <= 1 )
+        {
+            tm("readGraphicDataExp, Breaking on zero at i "+GString(i));
+            break;
+        }
+        else
+        {
+            ic = *( (sqldbchar *) (sqldaptr)->sqlvar[col].sqldata + i );
+            wc = (wchar_t) (ic / 256);
+            wcBuf[i-offset] = wc;
+            tm("readGraphicDataExp, Wrote wcBuf at i "+GString(i));
+        }
+    }
+    wcBuf[i-offset] = 0;
+    size_t cSizeX = wcstombs(NULL, wcBuf, 0);
+    char * trg = new char[cSizeX+1];
+
+    wcstombs(trg, wcBuf, cSizeX);
+    out = GString(trg, cSizeX);
+    tm("readGraphicDataExp, Offset: "+GString(offset)+", i: "+GString(i)+", cSizeX: "+GString((int)cSizeX)+", len: "+GString(length)+", out: "+out);
+
+
+    delete [] trg;
+    delete [] wcBuf;
+
+    if( iEmbrace ) out = "'" + out + "'";
+    return out;
+
+}
+
+
+/******************************************************
+ *
+ * offset: Should be 1 for VARGRAPHIC: First double-byte contains size info
+ * Should be 0 for GRAPHIC: No len info at beginning. Not that this is documented.
+ *
+ *
+
+GString dsqlobj::readGraphicData(struct sqlda* sqldaptr, short col, int offset)
+{
+
+    SQLUDF_GRAPHcSizeX
+    memcpy(&varGraphMBS, sqldaptr->sqlvar[col].sqldata, XML_MAX);
+//    GString fldData = GString(varGraphMBS.data, XML_MAX);
+
+    struct VarGraphWCS_t{
+        short length;
+        wchar_t data[XML_MAX];
+    } varGraphWCS;
+
+    struct VarGraphMBS_t{
+        short length;
+        sqldbchar data[1];
+    } varGraphMBS;
+
+    //struct varGraphMBS *result;
+
+    struct SqlDbCharStruct {
+        long length;
+        sqldbchar *data;
+    } *bufSqlDBChar;
+
+    if( sqlForBitSeq.elementAtPosition(col+1) == DATA_HIDE ) return "@DSQL@GRAPHIC";
+    //wprintf("---------Start read\n");
+
+    GString out;
+    char singleChar[2];
+    memcpy(&varGraphWCS, sqldaptr->sqlvar[col].sqldata, sqldaptr->sqlvar[col].sqllen);
+    memcpy(&varGraphMBS, sqldaptr->sqlvar[col].sqldata, sqldaptr->sqlvar[col].sqllen);
+    //memcpy(result, sqldaptr->sqlvar[col].sqldata, sqldaptr->sqlvar[col].sqllen);
+    //printf("%s\n", result->data);
+
+    //result = sqldaptr->sqlvar[col].sqldata;
+
+    GString qs;
+    wchar_t wc;
+    int ic;
+    char c;
+    const char xc  = '\xc3\xa4';
+    ic = xc;
+    int ae;
+    setlocale(LC_ALL, "");
+    GString gs = xc;
+    wprintf(L"as c: %c, as int: %i\n", xc, xc);
+
+    wchar_t buf[16];
+    swprintf(buf, sizeof(buf) / sizeof(*buf), L"%c", xc);
+
+
+    wchar_t *pwcs = (wchar_t *)malloc( sqldaptr->sqlvar[col].sqllen * sizeof( wchar_t ));
+    char *pmb;
+
+    pmb = (sqldaptr)->sqlvar[col].sqldata;
+    int len = mbstowcs( pwcs, (const char*) &(varGraphMBS.data), varGraphMBS.length);
+
+
+    sqldbchar* sqlBuf;
+    sqlBuf = new sqldbchar[(sqldaptr)->sqlvar[col].sqllen];
+    memcpy(sqlBuf, (sqldaptr)->sqlvar[col].sqldata, (sqldaptr)->sqlvar[col].sqllen);
+    char charBuf[10];
+
+    len = mbstowcs( pwcs, (char*)varGraphMBS.data, varGraphMBS.length);
+    len = wcstombs(charBuf, pwcs, 4);
+    printf("charBuf1: %s\n", charBuf);
+
+    len = mbstowcs( pwcs, (char*)varGraphWCS.data, varGraphWCS.length);
+    len = wcstombs(charBuf, pwcs, 4);
+    printf("charBuf2: %s\n", charBuf);
+
+
+    //printf("Len: %i, pwcs: %s", len, pwcs);
+
+
+    for ( short i = 0 ; i < (sqldaptr)->sqlvar[col].sqllen ; i++ )
+    {
+        if ( *( (sqldbchar *) (sqldaptr)->sqlvar[col].sqldata + (i+1) ) == 0 ) break;
+        else
+        {
+
+            sprintf( singleChar, "%x", *( (sqldbchar *) (sqldaptr)->sqlvar[col].sqldata + (i+offset) ) ) ;
+            printf("fldData at %i (HEX): %s\n", i, (char*)singleChar);
+            sprintf( singleChar, "%i", *( (sqldbchar *) (sqldaptr)->sqlvar[col].sqldata + (i+offset) ) ) ;
+            printf("fldData at %i (INT): %s\n", i, (char*)singleChar);
+            printf( "AsInt: %i\n",  *( (sqldbchar *) (sqldaptr)->sqlvar[col].sqldata + (i+offset) ) ) ;
+            ic = *( (sqldbchar *) (sqldaptr)->sqlvar[col].sqldata + (i+offset) );
+
+            wc = (wchar_t) (ic / 256);
+
+            wprintf( L"AsWchar: %c\n",  wc ) ;
+            swprintf(buf, sizeof(buf) / sizeof(*buf), L"%c", wc);
+            ic =  (ic / 256);
+            if( ic < 0 ) ic += 256;
+            c = ic;
+
+            //out += singleChar;
+            out += c;
+
+            printf("fldData at %i: %s, char: %c, ic: %i\n", i, (char*)out, c, ic);
+        }
+    }
+    //if( iEmbrace ) out = "'" + out + "'";
+    return out;
+}
+
+***************************************************/
+
+//**********************************************************************
+//************************** Get Functions *****************************
+//**********************************************************************
+int dsqlobj::positionOfHostVar(const GString & hostVar)
+{
+    unsigned long i; //short would suffice, alas, it would mean implicit cast
+    for( i = 1; i <= hostVarSeq.numberOfElements(); ++i )
+    {
+        if( hostVarSeq.elementAtPosition(i) == hostVar ) return i;
+    }
+    return 0;
+}
+
+long dsqlobj::dataLen(const short &pos )
+{
+    if( pos < 1 || pos > (short) sqlLenSeq.numberOfElements() ) return 0;
+    return sqlLenSeq.elementAtPosition( pos );
+}
+GString dsqlobj::hostVariable(int pos )
+{
+    if( pos < 1 || pos > (short) hostVarSeq.numberOfElements() ) return "@hostVariable:OutOfReach";
+    return hostVarSeq.elementAtPosition(pos);
+}
+
+GString dsqlobj::rowElement( unsigned long row, int col)
+{
+    //Overload 1
+    //tm("::rowElement for "+GString(line)+", col: "+GString(col));
+    if( row < 1 || row > allRowsSeq.numberOfElements() ) return "@OutOfReach";
+    GRowHdl *aRow;
+    aRow = allRowsSeq.elementAtPosition(row);
+    if( col < 1 || (unsigned long) col > aRow->elements() ) return "OutOfReach";
+    return aRow->rowElementData(col);
+}
+
+GString dsqlobj::rowElement( unsigned long row, GString hostVar)
+{
+    //Overload 2
+    unsigned long pos;
+    if( row < 1 || row > allRowsSeq.numberOfElements() ) return "@OutOfReach";
+    GRowHdl *aRow;
+    aRow = allRowsSeq.elementAtPosition(row);
+    pos = positionOfHostVar(hostVar);
+    if( pos < 1 || pos > aRow->elements() ) return "OutOfReach";
+    return aRow->rowElementData(pos);
+}
+
+short dsqlobj::sqlType(const short & col)
+{
+    if( col < 1 || col > (short) sqlTypeSeq.numberOfElements() ) return -1;
+    else return sqlTypeSeq.elementAtPosition(col);
+}
+short dsqlobj::sqlType(const GString & colName)
+{
+    for( short i = 1; i <= (short) hostVarSeq.numberOfElements(); ++ i )
+    {
+        if( hostVarSeq.elementAtPosition(i) == colName ) return sqlTypeSeq.elementAtPosition(i);
+    }
+    return -1;
+}
+
+short dsqlobj::sqlVarLength(const short & col)
+{
+    if( col < 1 || col > (short) sqlVarLengthSeq.numberOfElements() ) return -1;
+    else return sqlVarLengthSeq.elementAtPosition(col);
+}
+
+GString dsqlobj::currentCursor(GString filter, GString command, long curPos, short commitIt, GSeq <GString> *fileList, GSeq <long> *lobType)
+{
+    tm("CurCrs: Filter: "+filter+", cmd: "+command+", pos: "+GString(curPos));
+    if( filter == "" || command == "" ) return "CurrentCursor(): DontKnowWhatToDo";
+    if( curPos < 0 ) return "CurrentCursor(): POS < ";
+
+    short erc;
+    long count = 0;
+    struct sqlda *sqldaptr = NULL;
+    GString error = "";
+
+    //Prepare Filter Statement
+    //FOR UPDATE somehow changes the result order. Strange.
+    strcpy( stmt, filter+" FOR UPDATE" );
+    //   strcpy( stmt, filter);
+
+    int haveLOBs = 0;
+    if( fileList != NULL )
+    {
+        if( fileList->numberOfElements() > 0 ) haveLOBs = 1;
+    }
+    init_da ( &sqldaptr, 1 );
+
+
+    EXEC SQL PREPARE statement FROM :stmt;
+    if (sqlca.sqlcode < 0)
+    {
+        tm("Failed on 1st Prepare. ERC: "+GString(sqlca.sqlcode)+"\n"+sqlError());
+        iErrCode = sqlca.sqlcode;
+        return "Failed on 1st Prepare. ERC: "+GString(sqlca.sqlcode)+"\n"+sqlError();
+    }
+
+    //Describe....
+    sqldaptr->sqln=1;
+    EXEC SQL DESCRIBE statement INTO :*sqldaptr;
+    if (sqlca.sqlcode < 0 ){
+        iErrCode = sqlca.sqlcode;
+        tm("Describe Failed. ERC: "+GString(sqlca.sqlcode)+", "+sqlError());
+        return "Describe Failed. ERC: "+GString(sqlca.sqlcode);
+    }
+    short cols = sqldaptr->sqld;
+
+
+
+    if( (sqlca.sqlcode > 236 && sqlca.sqlcode < 240) || haveLOBs  )
+    {
+        cols *= 2; //BLOBS !!
+        erc = init_da ( &sqldaptr, cols, 1 );
+        //SETSQLDOUBLED(sqldaptr, SQLDOUBLED);
+        tm("Got LOB");
+    }
+    else erc = init_da ( &sqldaptr, cols);
+    //Describe again...
+    EXEC SQL DESCRIBE statement INTO :*sqldaptr;
+    if (erc)
+    {
+        tm("Describe failed on 2nd. "+sqlError());
+        iErrCode = sqlca.sqlcode;
+        return "Describe failed on 2nd.";
+    }
+    if( alloc_host_vars(sqldaptr) ){iErrCode = sqlca.sqlcode; return "Failed to alloc HostVars. ErrCode: "+GString(iErrCode);}
+
+
+    //Now Declare and open Cursor...
+    EXEC SQL DECLARE cur CURSOR FOR statement;
+    tm("Declaring CRS, got errror "+GString(sqlca.sqlcode));
+    EXEC SQL OPEN cur;
+    tm("Opening CRS, got errror "+GString(sqlca.sqlcode));
+
+
+    while( sqlca.sqlcode == 0)    //get rows
+    {
+
+        EXEC SQL FETCH cur USING DESCRIPTOR :*sqldaptr;
+        if( sqlca.sqlcode )
+        {
+            tm("In While, got errror "+GString(sqlca.sqlcode));
+            break;
+        }
+        count++;
+        tm("CurPos: "+GString(curPos)+", count: "+GString(count));
+        if( curPos >= 0 && count == curPos )
+        {
+            command = command +" WHERE CURRENT OF cur";
+
+            //This is somewhat akin to magic: We opened a cursor and positioned the cursor on the n-th position.
+            //Next we call uploadBlob(...) which allocates its own SQLDA and performs an update on at least one LOB column
+            //The update apparently happens on the current cursor position.
+            if( fileList != NULL )
+            {
+                tm("FileList is valid, elements: "+GString(fileList->numberOfElements()));
+                if( fileList->numberOfElements() ) uploadBlob(command, fileList, lobType);
+            }
+            else
+            {
+                strcpy(stmt2, command);
+                ///if( fileList->numberOfElements() ) prepSQLDAForLOBs(&sqldaptr, fileList->elementAtPosition(1), lobType->elementAtPosition(1), 2);
+
+                EXEC SQL PREPARE statement2 FROM :stmt2;
+                tm("CurCrs: CMD: "+command);
+                EXEC SQL EXECUTE statement2;
+                ///EXEC SQL EXECUTE statement2 USING DESCRIPTOR :*sqldaptr;
+            }
+            if( sqlca.sqlcode && commitIt )
+            {
+                iErrCode = sqlca.sqlcode;
+                error = sqlError();
+                tm("CurCrs: err: "+GString(sqlca.sqlcode)+", txt: "+sqlError());
+                EXEC SQL ROLLBACK;
+                break;
+            }
+            else
+            {
+                iErrCode = sqlca.sqlcode;
+                error = sqlError();
+                if( commitIt ) EXEC SQL COMMIT;
+                tm("CurCrs: committed only if commitIt == 1.");
+                break;
+            }
+        }
+
+    }
+    tm("CurCrs: Lines Done, erc: "+GString(sqlca.sqlcode));
+    EXEC SQL CLOSE cur;
+    if( commitIt ) EXEC SQL COMMIT;
+    free_da(sqldaptr);
+    return error;
+}
+
+GString dsqlobj::deleteByCursor(GString filter, GString command, long deleteCount, short commitIt)
+{
+    tm("CurCrs: Filter: "+filter+", cmd: "+command+", pos: "+GString(deleteCount));
+    if( filter == "" || command == "" ) return "CurrentCursor(): DontKnowWhatToDo";
+    if( deleteCount < 0 ) return "deleteByCursor(): Nothing to delete ";
+
+    short erc;
+    long count = 0;
+    struct sqlda *sqldaptr = NULL;
+    GString error = "";
+
+    strcpy( stmt, filter+" FOR UPDATE" );
+    init_da ( &sqldaptr, 1 );
+
+    EXEC SQL PREPARE delByCrsStmt FROM :stmt;
+    if (sqlca.sqlcode < 0)
+    {
+        tm("deleteByCursor: Failed on 1st Prepare. ERC: "+GString(sqlca.sqlcode)+"\n"+sqlError());
+        iErrCode = sqlca.sqlcode;
+        return "deleteByCursor: Failed on 1st Prepare. ERC: "+GString(sqlca.sqlcode)+"\n"+sqlError();
+    }
+    //Describe....
+    sqldaptr->sqln=1;
+    EXEC SQL DESCRIBE delByCrsStmt INTO :*sqldaptr;
+    if (sqlca.sqlcode < 0 ){
+        iErrCode = sqlca.sqlcode;
+        tm("deleteByCursor: Describe Failed. ERC: "+GString(sqlca.sqlcode)+", "+sqlError());
+        return "deleteByCursor: Describe Failed. ERC: "+GString(sqlca.sqlcode);
+    }
+    short cols = sqldaptr->sqld;
+
+
+
+    if( (sqlca.sqlcode > 236 && sqlca.sqlcode < 240) )
+    {
+        cols *= 2; //BLOBS !!
+        erc = init_da ( &sqldaptr, cols, 1 );
+        //SETSQLDOUBLED(sqldaptr, SQLDOUBLED);
+        tm("deleteByCursor: Got LOB");
+    }
+    else erc = init_da ( &sqldaptr, cols);
+    //Describe again...
+    EXEC SQL DESCRIBE delByCrsStmt INTO :*sqldaptr;
+    if (erc)
+    {
+        tm("deleteByCursor: Describe failed on 2nd. "+sqlError());
+        iErrCode = sqlca.sqlcode;
+        return "deleteByCursor: Describe failed on 2nd.";
+    }
+    if( alloc_host_vars(sqldaptr) ){iErrCode = sqlca.sqlcode; return "deleteByCursor: Failed to alloc HostVars. ErrCode: "+GString(iErrCode);}
+
+
+    //Now Declare and open Cursor...
+    EXEC SQL DECLARE delByCrsCRS CURSOR FOR delByCrsStmt;
+    tm("deleteByCursor: Declaring CRS, got errror "+GString(sqlca.sqlcode));
+    EXEC SQL OPEN delByCrsCRS;
+    tm("deleteByCursor: Opening CRS, got errror "+GString(sqlca.sqlcode));
+
+    command = command +" WHERE CURRENT OF delByCrsCRS";
+    strcpy(stmt5, command);
+    EXEC SQL PREPARE delByCrsStmt_2 FROM :stmt5;
+    tm("CurCrs: CMD: "+command);
+
+    while( sqlca.sqlcode == 0 && count < deleteCount )    //get rows
+    {
+        EXEC SQL FETCH delByCrsCRS USING DESCRIPTOR :*sqldaptr;
+        if( sqlca.sqlcode )
+        {
+            tm("deleteByCursor: In While, got errror "+GString(sqlca.sqlcode));
+            break;
+        }
+        count++;
+        tm("deleteByCursor: CurPos: "+GString(deleteCount)+", count: "+GString(count));
+        EXEC SQL EXECUTE delByCrsStmt_2;
+        if( sqlca.sqlcode && commitIt )
+        {
+            iErrCode = sqlca.sqlcode;
+            error = sqlError();
+            tm("CurCrs: err: "+GString(sqlca.sqlcode)+", txt: "+sqlError());
+            EXEC SQL ROLLBACK;
+            break;
+        }
+        else
+        {
+            iErrCode = sqlca.sqlcode;
+            error = sqlError();
+            if( commitIt ) EXEC SQL COMMIT;
+            tm("CurCrs: committed only if commitIt == 1.");
+        }
+    }
+    tm("CurCrs: Lines Done, erc: "+GString(sqlca.sqlcode));
+    EXEC SQL CLOSE delByCrsCRS;
+    if( commitIt ) EXEC SQL COMMIT;
+    EXEC SQL COMMIT;
+    free_da(sqldaptr);
+    return error;
+}
+
+
+
+GString dsqlobj::fullLine(const unsigned long & index, GString sep)
+{
+    GString line;
+    if( index < 1 || index > allRowsSeq.numberOfElements() ) return "@fullLine:OutOfReach";
+    GRowHdl *aRow;
+
+    aRow = allRowsSeq.elementAtPosition(index);
+    line = "";
+    for( unsigned long i=1; i<=aRow->elements(); ++i )
+    {
+        line += hostVariable(i).strip() + ": "+(aRow->rowElementData(i)).strip()+sep;
+    }
+    line.stripTrailing(sep);
+    return line;
+}
+GString dsqlobj::realName(const short & sqlType)
+{
+    switch (sqlType)
+    {
+    case 384:
+    case 385:
+        return "DATE";
+    case 388:
+    case 389:
+        return "TIME";
+    case 392:
+    case 393:
+        return "TIMESTAMP";
+    case 400:
+    case 401:
+        return "C-GraphString";
+    case 404:
+    case 405:
+        return "BLOB";
+    case 408:
+    case 409:
+        return "CLOB";
+    case 412:
+    case 413:
+        return "DBCLOB";
+    case 448:
+    case 449:
+        return "VARCHAR";
+    case 452:
+    case 453:
+        return "CHAR";
+    case 456:
+    case 457:
+        return "LONG";
+    case 460:
+    case 461:
+        return "String";
+    case 464:
+    case 465:
+        return "VarGraphicStr";
+    case 468:
+    case 469:
+        return "GraphicStr";
+    case 472:
+    case 473:
+        return "LongGraphStr";
+    case 476:
+    case 477:
+        return "LStr";
+    case 480:
+    case 481:
+        return "FLOAT";
+    case 484:
+    case 485:
+        return "DECIMAL";
+    case 488:
+    case 489:
+        return "ZonedDecimal";
+    case 492:
+    case 493:
+        return "BigINT (64Bit)";
+    case 496:
+    case 497:
+        return "INTEGER";
+    case 500:
+    case 501:
+        return "SMALL";
+    case 504:
+    case 505:
+        return "Numeric";
+    case 804:
+    case 805:
+        return "BLOB";
+    case 808:
+    case 809:
+        return "CLOB";
+    case 812:
+    case 813:
+        return "DBCLOB";
+    case 960:
+    case 961:
+        return "BLOB Locator";
+    case 964:
+    case 965:
+        return "CLOB Locator";
+    case 968:
+    case 969:
+        return "DBCLOB Locator";
+    case 988:
+    case 989:
+        return "XML";
+
+    default:
+        return "Unknown: "+GString(sqlType);
+    }
+    return "";
+}
+
+void dsqlobj::tm(GString message)
+{
+    if( m_pGDB ) m_pGDB->debugMsg("DSQLOBJ", m_iMyInstance, message);
+}
+
+//***********************************************************************
+//***************************** APIs which need BIND ********************
+//***********************************************************************
+short dsqlobj::bindIt(GString bndFile, GString database, GString user, GString pwd, GString msgFile)
+{
+    tm("bindIt start");
+    signed long erc;
+    struct sqlopt *sqloptStructPointer;
+    struct sqloptions *optionsPointer;
+
+    char grant[]  = "PUBLIC";
+    struct sqlchar *sqcGrant;
+    sqcGrant = (struct sqlchar *)malloc(strlen(grant)+sizeof (struct sqlchar));
+    sqcGrant->length = strlen(grant);
+    strncpy (sqcGrant->data, grant, strlen(grant));
+
+    erc = 0;
+    tm("bindIt connecting");
+    strcpy (sqlDB, database);
+    strcpy (sqlUID, user);
+    strcpy (sqlPWD, pwd);
+
+    EXEC SQL CONNECT TO :sqlDB USER :sqlUID USING :sqlPWD;
+    if( sqlca.sqlcode )
+    {
+        iErrCode = sqlca.sqlcode;
+        free(sqcGrant);
+        return 1;
+    }
+
+    int numOpt = 3;
+    sqloptStructPointer = (struct sqlopt *) malloc
+            (sizeof (struct sqlopt) + (numOpt * sizeof (struct sqloptions)));
+    sqloptStructPointer->header.allocated = numOpt;
+    sqloptStructPointer->header.used      = numOpt;
+    optionsPointer = sqloptStructPointer->option;
+
+    optionsPointer = sqloptStructPointer->option;
+    optionsPointer->type = SQL_SQLERROR_OPT;
+    optionsPointer->val = SQL_SQLERROR_CONTINUE;
+    optionsPointer++;
+    optionsPointer->type = SQL_SQLERROR_OPT;
+    optionsPointer->val = SQL_SQLERROR_CONTINUE;
+    optionsPointer++;
+    tm("bindIt setting sqlchar...");
+    //Expand BIND to "...GRANT TO PUBLIC"
+    optionsPointer->type = SQL_GRANT_OPT;
+    optionsPointer->val = (sqluintptr) sqcGrant;
+
+    /*************************************
+   * Memo: BIND options can be used to expand the BIND command.
+   * Ex.: SQL_GRANT_USER_OPT will expand the BIND command to "bind <package> GRANT TO USER <username>"
+   * <username> must then be set in "struct sqlchar"
+   * Apparently "GRANT TO " is added whenever options are present.
+   *************************************/
+
+
+    //   sqlabndx (bndFile, "dsqlbase.msg", sqloptStructPointer, &sqlca);
+    tm("Erc preBind: "+GString(erc)+", SQLCode: "+GString(sqlca.sqlcode));
+    sqlabndx (bndFile, msgFile, sqloptStructPointer, &sqlca);
+    sqlaintp( SqlMsg, sizeof(SqlMsg), 1024, &sqlca );
+    tm( GString(&SqlMsg[0]) );
+
+    tm("SqlError From Bind: "+GString(sqlca.sqlcode));
+    if (sqlca.sqlcode < 0) erc = sqlca.sqlcode;
+    else erc = 0;
+    iErrCode = erc;
+
+    EXEC SQL CONNECT RESET;
+    free(sqloptStructPointer);
+    remove((char*) msgFile);
+    free(sqcGrant);
+    return erc;
+}
+
+int dsqlobj::deleteTable(GString tableName)
+{
+    GString cmd = "DROP TABLE "+tableName;
+    strcpy (stmt, cmd);
+    EXEC SQL EXECUTE IMMEDIATE :stmt;
+    iErrCode = sqlca.sqlcode;
+    EXEC SQL COMMIT;
+
+    if( iErrCode && this->getDdlForView(tableName).length() )
+    {
+        cmd = "DROP VIEW "+tableName;
+        strcpy (stmt, cmd);
+        EXEC SQL EXECUTE IMMEDIATE :stmt;
+        iErrCode = sqlca.sqlcode;
+        EXEC SQL COMMIT;
+    }
+    return iErrCode;
+}
+
+void dsqlobj::mb(GString message)
+{
+#ifndef NO_QT
+    QMessageBox::information(0, "DSQLOBJ", message);
+#else
+    PMF_UNUSED(message);
+#endif
+}
+
+GString dsqlobj::fillChecksView(GString table, int showRaw)
+{
+    clearCommSequences();
+    GString tabSchema = this->tabSchema(table);
+    GString tabName   = this->tabName(table);
+
+    GString cmd = "select constname, trim(tabschema) as schema, Text as Check from syscat.checks where tabschema = '"+tabSchema+"' and tabname ='"+tabName+"'";
+    GString err = this->initAll(cmd);
+
+    for( int i = 1; i <= (int)this->numberOfColumns(); ++i)
+    {
+        headerSeq.add(this->hostVariable(i));
+    }
+    RowData * rowData;
+    int erc;
+    GString temp, blobText;
+
+    for( int i = 1; i <= (int)this->numberOfRows(); ++i )
+    {
+        rowData = new RowData;
+        rowData->add(this->rowElement(i, 1).strip("'")); //.removeButOne().strip() );
+        rowData->add(this->rowElement(i, 2).strip("'")); //.removeButOne().strip() );
+        temp = "Select text from syscat.checks where constname="+this->rowElement(i,1);
+        temp += " and tabschema = '"+tabSchema+"' and tabname ='"+tabName+"'";
+        erc = this->retrieveBlob( temp, blobText, 0 );
+        if( erc )
+        {
+            blobText = "!! Error "+GString(erc)+" reading 'TEXT' from table syscat.checks for constname "+this->rowElement(i, 1).strip("'");
+        }
+        rowData->add(blobText.strip("'")); //.removeButOne().strip() );
+        rowSeq.add(rowData);
+    }
+
+
+//    this->initAll("SELECT INDNAME, trim(INDSCHEMA), COLNAMES, t.TBSPACE FROM "
+//            "SYSCAT.INDEXES i, SYSCAT.TABLESPACES t WHERE TABSCHEMA='"+tabSchema+"' "
+//            "AND TABNAME='"+tabName+"' AND UNIQUERULE = 'U' and t.TBSPACEID=i.TBSPACEID AND USER_DEFINED=0");
+
+//    for(unsigned long  i=1; i<=this->numberOfRows(); ++i )
+//    {
+//        rowData = new RowData;
+//        rowData->add(this->rowElement(i, 1).strip("'"));
+//        rowData->add(this->rowElement(i, 2).strip("'"));
+//        rowData->add(this->rowElement(i, 3).strip("'").change("*",",").change("-",",").change("+",",").strip(","));
+//        rowSeq.add(rowData);
+//    }
+    return err;
+
+
+/*
+
+    for( unsigned long i = 1; i <= (int)this->numberOfRows(); ++i )
+    {
+        out = "";
+        temp = "Select text from syscat.checks where constname="+this->rowElement(i,1);
+        temp += " and tabschema = '"+tabSchema+"' and tabname ='"+tabName+"'";
+
+        erc = this->retrieveBlob( temp, blobText, 0 );
+        if( erc )
+        {
+            out += temp+"\n";
+            out += "-- !! ERROR "+GString(erc)+" retrieving check '"+this->rowElement(i,1)+"'\n";
+            continue;
+        }
+        else
+        {
+            blobText = blobText.change("\t", " ").removeButOne().strip();
+            out = "ALTER TABLE "+table+" ADD CONSTRAINT \""+this->rowElement(i,1)+"\" CHECK ("+blobText+");";
+        }
+
+        checksSeq.add(out);
+    }
+
+    GString indName, colNames;
+    this->initAll("SELECT INDSCHEMA, INDNAME, COLNAMES, UNIQUERULE, t.TBSPACE FROM "
+            "SYSCAT.INDEXES i, SYSCAT.TABLESPACES t WHERE TABSCHEMA='"+tabSchema+"' "
+            "AND TABNAME='"+tabName+"' AND UNIQUERULE = 'U' and t.TBSPACEID=i.TBSPACEID AND USER_DEFINED=0");
+
+    for(unsigned long  i=1; i<=this->numberOfRows(); ++i )
+    {
+        out = "";
+        indName = this->rowElement(i,2).strip("'");
+        colNames = this->rowElement(i,3).strip("'").change("*",",").change("-",",").change("+",",").strip(",");
+        out += "ALTER TABLE "+table+" ADD CONSTRAINT "+indName+" UNIQUE ";
+        out += "("+colNames+");";
+        checksSeq.add(out);
+    }
+    return checksSeq;
+
+*/
+
+}
+
+
+/*********************************************************/
+/*********************************************************/
+/*********************************************************/
+/********** QT RELATED THINGS ****************************/
+/********** ONE LARGE IFDEF!  ****************************/
+/*********************************************************/
+/*********************************************************/
+/*********************************************************/
+
+/*********************************************************/
+/****************** QT4 **********************************/
+/*********************************************************/
+#ifdef QT4_DSQL
+/*************************************************************************
+* Overloaded for QT4. The QT3 variant is below.
+*/
+GString dsqlobj::getIdenticals(GString table, QWidget* parent, QListWidget *pLB, short autoDel)
+{
+    GString message = "SELECT * FROM "+table;
+    long erc;
+    GString retString = "";
+    struct sqlda *sqldaptr = NULL;
+    GString fldData, hostVar;
+
+    //Allocate with one column i.e. init_da(1)
+    tm("GetID: Allocating dummy...");
+    if ( init_da(&sqldaptr, 1) ){iErrCode = sqlca.sqlcode; return "Initial alloc of sqlda failed.";}
+    tm("GetID: Dummy allocated.");
+    strcpy(stmt, message);
+    tm("GetID: Prepare...");
+    EXEC SQL PREPARE countStat4 FROM :stmt;
+    if (sqlca.sqlcode ){iErrCode = sqlca.sqlcode; return "Failed on 1st Prepare. Error: "+GString(sqlca.sqlcode)+"\n"+sqlError();}
+    tm("GetID: Describe...");
+    sqldaptr->sqln=1;
+    EXEC SQL DESCRIBE countStat4 INTO :*sqldaptr;
+
+    //Now initialize again....
+    tm("GetID: Allocating for real...");
+    short cols = sqldaptr->sqld;
+    short doubleIt = 1;
+    if( (sqlca.sqlcode > 236 && sqlca.sqlcode < 240) || doubleIt)
+    {
+        cols *= 2; //BLOBS !!
+        erc = init_da(&sqldaptr, cols, 1);
+    }
+    else erc = init_da(&sqldaptr, cols);
+    if( erc ) {iErrCode = sqlca.sqlcode; return "Failed to allocate SQLDA.";}
+
+
+    tm("GetID: Describing again...");
+    EXEC SQL DESCRIBE countStat4 INTO :*sqldaptr;
+    if (sqlca.sqlcode != 0)
+    {
+        iErrCode = sqlca.sqlcode;
+        return "Describe failed on 2nd, Error: "+GString(sqlca.sqlcode)+"\n"+sqlError();
+    }
+
+    if( alloc_host_vars(sqldaptr) )return "Not enough memory available. Sorry.";
+
+    iNumberOfColumns = sqldaptr->sqld;
+
+    EXEC SQL DECLARE cur4 CURSOR WITH HOLD FOR countStat4;
+    EXEC SQL OPEN cur4;
+    if (sqlca.sqlcode ){iErrCode = sqlca.sqlcode; return "Failed to Open Cursor. ERC: "+GString(sqlca.sqlcode);}
+    tm("GetID: Starting Lines...Now...");
+    int lns =0, perc = 0, pass = 1;
+
+
+    int blockSize = 2000;
+    //const QString & labelText, const QString & cancelButtonText, int minimum, int maximum, QWidget * parent = 0, Qt::WindowFlags f = 0 )
+
+    QProgressDialog * apd = NULL;
+    apd = new QProgressDialog(GString("Searching in "+table), "Cancel", 0, blockSize, parent);
+    apd->setWindowModality(Qt::WindowModal);
+    apd->setValue(1);
+
+
+    while (sqlca.sqlcode == 0 && !iStop ) //Read all Lines
+    {
+        if( !(perc % 10) ) apd->setValue(perc);
+        if( apd->wasCanceled() )
+        {
+            retString = "QUIT";
+            break;
+        }
+
+        if( sqlca.sqlcode ) break;        
+        EXEC SQL FETCH cur4 USING DESCRIPTOR :*sqldaptr;
+        if( sqlca.sqlcode ) break;
+        retString = countOccurrences(table, sqldaptr, pLB, autoDel);
+        EXEC SQL COMMIT;
+        if( retString.length() ) break;
+        //if( lns % 10 == 0 )info->setText("Table: "+table+", row "+GString(lns));
+        lns++;
+        perc++;
+        if( perc > blockSize )
+        {
+            pass++;
+            tm("::getIdenticals, set label...");
+            apd->setLabelText(table+", chunk #"+GString(pass)+" (2000 rows per chunk)");
+            apd->setValue(pass);
+            perc = 1;
+        }
+    }
+
+    if( apd )
+    {
+        apd->setValue(blockSize);
+        delete apd;
+    }
+
+    if(sqlca.sqlcode && sqlca.sqlcode != 100) { retString = GString(sqlca.sqlcode)+"\n"+sqlError(); tm("SQLCode: " +GString(sqlca.sqlcode));}
+    EXEC SQL CLOSE cur4;
+    EXEC SQL COMMIT; //Free handles, unlock.
+    free_da(sqldaptr);
+    tm("GetID: *************** Ending.");
+    return retString;
+}
+
+GString dsqlobj::countOccurrences(GString table, struct sqlda * sqldaptr, QListWidget *pLB, short autoDel)
+{
+    GString command, line, delFilter, err;
+    unsigned long nol, i, cols;
+
+    command    = "SELECT COUNT (*) FROM "+table+" WHERE ";
+    delFilter  = "SELECT * FROM "+table+" WHERE ";
+    line    = "Row: ";
+
+    cols = sqldaptr->sqld;
+    GString colName, colData;
+
+    tm("::countOccurrences, start");
+    for(i = 0; i < cols;++i) //anzahl der Spalten
+    {
+        colName = "\""+GString(sqldaptr->sqlvar[i].sqlname.data)+"\"";
+        tm("::countOccurrences, col: "+colName);
+        if ( (sqldaptr->sqlvar[i].sqltype & 1)  && *(sqldaptr->sqlvar[i].sqlind) < 0 ) colData = " IS NULL";
+        else if( sqldaptr->sqlvar[i].sqltype == SQL_TYP_BLOB_FILE
+                || sqldaptr->sqlvar[i].sqltype == SQL_TYP_NBLOB_FILE
+                || sqldaptr->sqlvar[i].sqltype == SQL_TYP_CLOB_FILE
+                || sqldaptr->sqlvar[i].sqltype == SQL_TYP_NCLOB_FILE
+                || sqldaptr->sqlvar[i].sqltype == SQL_TYP_DBCLOB_FILE
+                || sqldaptr->sqlvar[i].sqltype == SQL_TYP_NDBCLOB_FILE
+                || sqldaptr->sqlvar[i].sqltype == SQL_TYP_BLOB_LOCATOR
+                || sqldaptr->sqlvar[i].sqltype == SQL_TYP_NBLOB_LOCATOR
+                || sqldaptr->sqlvar[i].sqltype == SQL_TYP_CLOB_LOCATOR
+                || sqldaptr->sqlvar[i].sqltype == SQL_TYP_NCLOB_LOCATOR
+                || sqldaptr->sqlvar[i].sqltype == SQL_TYP_DBCLOB_LOCATOR
+                || sqldaptr->sqlvar[i].sqltype == SQL_TYP_NDBCLOB_LOCATOR
+                || sqldaptr->sqlvar[i].sqltype == SQL_TYP_XML
+                || sqldaptr->sqlvar[i].sqltype == SQL_TYP_NXML )
+        {
+            continue;
+        }
+        else
+        {
+            colData = setFldData(sqldaptr, i );
+            convToSQL( colData );
+            colData = "="+colData;
+        }
+        command    += colName+colData+" AND ";
+        delFilter  += colName+colData+" AND ";
+        line += colName+colData+" | ";
+    }
+    command   = command.strip(" AND ");
+    delFilter = delFilter.strip(" AND ");
+    line    = line.strip(" | ");
+    tm("GetCnt: Command: "+command);
+    nol = countLines(command);
+    if( nol > 1 )
+    {
+        if( autoDel ) writeToLB( pLB, table +": Deleted "+GString(nol-1)+" times "+line );
+        else  writeToLB( pLB, table +": Found "+GString(nol)+" times "+line );
+    }
+    tm(line+", Count: "+GString(nol));
+
+    for( i=1; i<nol && autoDel && !iStop; ++i)
+    {
+        tm("DELETING: "+delFilter);
+        err = currentCursor(delFilter, "DELETE FROM "+table, 1, 0);
+        EXEC SQL COMMIT; //To close handles
+        if( err.length() ) break;
+    }
+    tm("::countOccurrences done, table: "+table);
+    //   if( countLines(command) > 1 ){ }//write to ListBox
+    return err;
+}
+void dsqlobj::writeToLB(QListWidget * pLB, GString message)
+{
+    for( int i = 0; i < pLB->count(); ++i )
+        if( GString(pLB->item(i)->text()) == message ) return;
+    new QListWidgetItem(message, pLB);
+}
+#endif //QT4
+/*********************************************************/
+/****************** QT4 END ******************************/
+/*********************************************************/
+
+#ifndef NO_QT
+/*********************************************************
+* This is the overloaded function initAll using QTs ListView.
+* This is for QT2/3, so it's basically dead code.
+*********************************************************/
+GString dsqlobj::initAll(GString message, QListView * pLV, unsigned long maxLines, short showRowNr )
+{
+    tm("EXT: In InitAll. CMD: "+message);
+
+    /***************** The HowTo **************************************
+   init_da with 1 column. It will fail, but SQLDA will be filled.
+   PrepareStatement
+   DescribeStatement
+     (watch for Blobs, they need twice the memory)
+   init_da with correct number of Cols
+   DescribeStatement
+   alloc_host_vars
+   declare, open and fetch Cursor
+   free SQLDA
+***************** END ********************************************/
+
+    QListViewItem * lvItem, *lastItem;
+    hostVarSeq.removeAll();
+    sqlTypeSeq.removeAll();
+    sqlVarLengthSeq.removeAll();
+    sqlIndVarSeq.removeAll();
+    sqlForBitSeq.removeAll();
+    struct sqlda * sqldaptr = NULL;
+    long erc;
+    GString retString = "";
+    iCommandOK = 0;
+    _stopThread = 0;
+    m_pRowAtCrs = NULL;
+    iNumberOfRows = iNumberOfColumns = iCost = iAffectedRows = 0;
+
+    if( showRowNr ) showRowNr = 1;
+
+    //Have to clear Main Sequence manually: Objects are created with "new"
+    tm("EXT: Clearing lvItemSeq....Elements: "+GString(lvItemSeq.numberOfElements()));
+    while( !lvItemSeq.isEmpty() )
+    {
+        lvItem =  lvItemSeq.firstElement();
+        //delete lvItem;
+        lvItemSeq.removeFirst();
+        delete lvItem;
+    }
+
+    tm("EXT: MainSequence Cleared.");
+
+    if( message == "" ) return "";
+
+    short i, indVar;
+    GString fldData, hostVar;
+
+    //Allocate with one column i.e. init_da(1)
+    tm("EXT: Allocating dummy...");
+    if ( init_da(&sqldaptr, 1) ){iErrCode = sqlca.sqlcode; return "Initial alloc of sqlda failed.";}
+    tm("EXT: Dummy allocated.");
+    //if CurrentOfCursor: message += " WHERE CURRENT OF cur";
+    strcpy(stmt, message);
+    tm("EXT: Prepare...");
+    EXEC SQL PREPARE stat2 FROM :stmt;
+    iAffectedRows = sqlca.sqlerrd[2];
+
+    tm("p3: AR: "+GString(iAffectedRows));
+    tm("EXT: ERC: "+GString(sqlca.sqlcode)+" Error: "+sqlError());
+    if (sqlca.sqlcode < 0 || sqlca.sqlcode == 100)
+    {
+        iErrCode = sqlca.sqlcode; return "Failed on 1st Prepare. ERC: "+GString(sqlca.sqlcode)+"\n"+sqlError();
+    }
+    iCost = sqlca.sqlerrd[3];
+    /****
+    if( iCost > 60000 )
+    {
+       GString txt = "Estimated statement cost is "+GString(iCost)+" timerons (i.e. it will take some time).\nContinue?";
+       if( QMessageBox::information(pLV, "PMF", txt, "Yes", "No", 0, 0, 1) ) return "";
+    }
+*****/
+    tm("EXT: Describe...");
+    sqldaptr->sqln=1;
+    EXEC SQL DESCRIBE stat2 INTO :*sqldaptr;
+
+
+
+    //Now initialize again....
+    tm("EXT: Allocating for real...");
+    short cols = sqldaptr->sqld;
+    if( sqlca.sqlcode > 236 && sqlca.sqlcode < 240 )
+    {
+        tm("EXT: Is a LOB...");
+        cols *= 2; //BLOBS !!
+        erc = init_da(&sqldaptr, cols, 1);
+    }
+    else erc = init_da(&sqldaptr, cols);
+    tm("EXT: Found "+GString(cols)+" COLs");
+    if( erc ){iErrCode = sqlca.sqlcode; return "Failed to allocate SQLDA.";}
+    tm("EXT: 2nd INIT_DA: Found "+GString(cols)+" COL");
+
+    /***************************************************
+    * if sqld is 0 we (probably) have a command.
+    */
+    if( sqldaptr->sqld == 0 )
+    {
+        iCommandOK = 1; //Flag: We had a transaction, not a select
+        tm("EXT: Running as command.");
+        EXEC SQL EXECUTE stat2;
+        erc = sqlca.sqlcode;
+        if( erc < 0 || erc == 100 )
+        {
+            tm("EXT: Rolling Back command.");
+            GString error = sqlError();
+            iErrCode = sqlca.sqlcode;
+            if( iCommit ) EXEC SQL ROLLBACK;
+            return "Exec Failed. ERC: "+GString(erc)+"\n"+error;
+        }
+        else
+        {
+            iErrCode = sqlca.sqlcode;
+            if( iCommit ) EXEC SQL COMMIT;
+            tm("INT: Committing command. ERC: "+GString(sqlca.sqlcode));
+            return "";
+        }
+    }
+
+    /***************************************************
+    * OK, it's not a command but maybe a select.
+    */
+    tm("EXT: Describing again...cols: "+GString(sqldaptr->sqld));
+    message += " FOR READ ONLY";
+    strcpy(stmt, message);
+    tm("EXT: Prepare...");
+    EXEC SQL PREPARE stat2 FROM :stmt;
+    iAffectedRows = sqlca.sqlerrd[2];
+    tm("p5: AR: "+GString(iAffectedRows));
+    EXEC SQL DESCRIBE stat2 INTO :*sqldaptr;
+    tm("EXT: After 2nd Describe: cols: "+GString(sqldaptr->sqld));
+
+    if (sqlca.sqlcode != 0){iErrCode = sqlca.sqlcode; return "Describe failed on 2nd.";}
+    if( alloc_host_vars(sqldaptr) ) return "Not enough memory available. Sorry.";
+
+    iNumberOfColumns = sqldaptr->sqld;
+
+    //HOSTVARIABLE + LENGTH + INDIKATOR VARIABLE
+
+    if( showRowNr ) pLV->addColumn("Row #");
+
+    for(i=0; i<iNumberOfColumns;++i) //anzahl der Spalten
+    {
+        //HostVar
+        tm("ColName: "+GString(sqldaptr->sqlvar[i].sqlname.data));
+        tm("ColLen: "+GString(sqldaptr->sqlvar[i].sqlname.length));
+        hostVar = GString(sqldaptr->sqlvar[i].sqlname.data, sqldaptr->sqlvar[i].sqlname.length);
+        hostVarSeq.add( hostVar );
+        //Types
+        sqlTypeSeq.add(sqldaptr->sqlvar[i].sqltype);
+        //Length
+        sqlVarLengthSeq.add(sqldaptr->sqlvar[i].sqllen);
+        //Indikator
+        if ( (sqldaptr->sqlvar[i].sqltype & 1) && *(sqldaptr->sqlvar[i].sqlind) < 0 )
+        {
+            indVar = *(sqldaptr->sqlvar[i].sqlind);
+            sqlIndVarSeq.add( indVar );
+        }
+        else sqlIndVarSeq.add( 1 );
+        pLV->addColumn(hostVar);
+    }
+    tm("Declaring CRS...");
+    EXEC SQL DECLARE cur2 CURSOR FOR stat2;
+    tm("Open CRS: Call Thread...");
+
+
+
+    EXEC SQL OPEN cur2;
+    tm("ThreadBox apparently closed, continuing.");
+    if (sqlca.sqlcode ){iErrCode = sqlca.sqlcode; return "Failed to Open Cursor. ERC: "+GString(sqlca.sqlcode);}
+
+
+    tm("EXT: Starting Lines now...");
+    GString title = "Fetching max "+GString(maxLines)+" rows...";
+
+    QProgressDialog apd(title, "Cancel", maxLines, pLV, "222", TRUE); // = new QProgressDialog(this);
+    apd.setCaption("DSQLOBJ");
+
+    iNumberOfRows = 0;
+
+    //    while (sqlca.sqlcode == 0) //Read all Lines
+    unsigned long lns;
+    if( maxLines == 0 ) maxLines = 2000;
+    short justLen = GString(maxLines).length();
+
+
+    lastItem = NULL;
+    //    pLV->setUpdatesEnabled(FALSE);
+    //    pLV->hide();
+    for( lns = 0; lns < maxLines && !sqlca.sqlcode; ++lns )
+    {
+        EXEC SQL FETCH cur2 USING DESCRIPTOR :*sqldaptr;
+
+        apd.setProgress(lns);
+        if( apd.wasCancelled() ) break;
+
+        if( sqlca.sqlcode ) break;
+        //Force QT to reverse order...
+
+        if( lastItem != NULL ) lvItem = new QListViewItem(pLV, lastItem);
+        else lvItem = new QListViewItem(pLV);
+        lastItem = lvItem;
+        if( showRowNr ) lvItem->setText(0, GString(iNumberOfRows+1).rightJustify(justLen, '0'));
+        for(i=0; i<iNumberOfColumns;++i)
+        {
+            if ( (sqldaptr->sqlvar[i].sqltype & 1) && *(sqldaptr->sqlvar[i].sqlind) < 0 )  fldData = "NULL";
+            else fldData = setFldData(sqldaptr, i);
+
+            lvItem->setText(i + showRowNr , fldData); //showRowNr is either 0 or 1
+            //!! This is BAD for performance -> tm("Line: "+GString(iNumberOfRows)+", Col: "+GString(i)+", val: "+fldData);
+        }
+        lvItemSeq.add(lvItem);
+        iNumberOfRows++;
+    }
+    if(sqlca.sqlcode && sqlca.sqlcode != 100 ) { retString = GString(sqlca.sqlcode)+"\n"+sqlError(); tm("SQLCode: " +GString(sqlca.sqlcode));}
+    EXEC SQL CLOSE cur2;
+    tm("EXT: ...Lines Done.");
+    free_da(sqldaptr);
+    apd.setProgress(maxLines);
+    m_strLastSqlSelectCommand = message;
+    //We'll commit even if we've only been reading stuff (to release locks)
+    EXEC SQL COMMIT;
+    //return "";
+    return retString;
+}
+/**************************************************************************
+*
+*/
+void dsqlobj::SqlThread::run()
+{   
+    myDSQL->openCrs();
+}
+int dsqlobj::openCrs()
+{
+    tm("OpenCRS....");
+
+    //EXEC SQL OPEN cur2;
+    tm("OpenCRS....DONE");
+    return 0;
+}
+
+/**************************************************************************
+*
+*
+int dsqlobj::openCrs()
+{
+   tm("openCRS...");
+
+   EXEC SQL OPEN cur2;
+   tm("openCRS...DONE");
+   while( !threadBox->isVisible() && _threadActive ) {tm("Waiting, txt: "+GString(threadBox->text())); Sleep(100);}
+   try{
+      threadBox->close();
+   } catch(...){tm("COULDN'T CLOSE");};
+   tm("OPENCRS finished OK");
+   return 0;
+}
+*/
+
+/*************************************************************************
+* Overloaded for QT3. The QT4 variant is above.
+* This variant should be removed sometime.
+*/
+GString dsqlobj::getIdenticals(GString table, QListBox * aLB, QLabel * info, short autoDel)
+{
+
+    GString message = "SELECT * FROM "+table;
+    long erc;
+    GString retString = "";
+    struct sqlda *sqldaptr = NULL;
+    GString fldData, hostVar;
+
+    //Allocate with one column i.e. init_da(1)
+    tm("GetID: Allocating dummy...");
+    if ( init_da(&sqldaptr, 1) ){iErrCode = sqlca.sqlcode; return "Initial alloc of sqlda failed.";}
+    tm("GetID: Dummy allocated.");
+    strcpy(stmt, message);
+    tm("GetID: Prepare...");
+    EXEC SQL PREPARE countStat FROM :stmt;
+    if (sqlca.sqlcode ){iErrCode = sqlca.sqlcode; return "Failed on 1st Prepare. ERC: "+GString(sqlca.sqlcode)+"\n"+sqlError();}
+    tm("GetID: Describe...");
+    sqldaptr->sqln=1;
+    EXEC SQL DESCRIBE countStat INTO :*sqldaptr;
+
+    //Now initialize again....
+    tm("GetID: Allocating for real...");
+    short cols = sqldaptr->sqld;
+    if( sqlca.sqlcode > 236 && sqlca.sqlcode < 240 )
+    {
+        cols *= 2; //BLOBS !!
+        erc = init_da(&sqldaptr, cols, 1);
+    }
+    else erc = init_da(&sqldaptr, cols);
+    if( erc ) {iErrCode = sqlca.sqlcode; return "Failed to allocate SQLDA.";}
+
+
+    tm("GetID: Describing again...");
+    EXEC SQL DESCRIBE countStat INTO :*sqldaptr;
+    if (sqlca.sqlcode != 0){iErrCode = sqlca.sqlcode; return "Describe failed on 2nd.";}
+    if( alloc_host_vars(sqldaptr) )return "Not enough memory available. Sorry.";
+
+    iNumberOfColumns = sqldaptr->sqld;
+
+    EXEC SQL DECLARE cur3 CURSOR WITH HOLD FOR countStat;
+    EXEC SQL OPEN cur3;
+    if (sqlca.sqlcode ){iErrCode = sqlca.sqlcode; return "Failed to Open Cursor. ERC: "+GString(sqlca.sqlcode);}
+    tm("GetID: Starting Lines...Now...");
+    unsigned long lns =0, perc = 0, pass = 1;
+
+    int blockSize = 2000;
+
+    QProgressDialog apd(table, "Cancel", blockSize, aLB, "222", TRUE);
+    apd.setLabelText(table+", block "+GString(pass)+"\n(2000 rows per block)");
+    apd.setCaption("DSQLOBJ");
+    aLB->setUpdatesEnabled(FALSE);
+
+    while (sqlca.sqlcode == 0 && !iStop ) //Read all Lines
+    {
+        apd.setProgress(perc);
+        if( apd.wasCancelled() )
+        {
+            retString = "QUIT";
+            break;
+        }
+        if( sqlca.sqlcode ) break;
+
+        EXEC SQL FETCH cur3 USING DESCRIPTOR :*sqldaptr;
+        if( sqlca.sqlcode ) break;
+        erc = countOccurrences(table, sqldaptr, aLB, autoDel);
+        tm("::getIdenticals, erc count: "+GString(erc));
+        EXEC SQL COMMIT;
+        //if( lns % 10 == 0 )info->setText("Table: "+table+", row "+GString(lns));
+        lns++;
+        perc++;
+        if( perc > blockSize )
+        {
+            pass++;
+            apd.setLabelText(table+", block "+GString(pass)+"\n(2000 rows per block)");
+            perc = 1;
+        }
+    }
+    apd.setProgress(blockSize);
+    if(sqlca.sqlcode && sqlca.sqlcode != 100) { retString = GString(sqlca.sqlcode)+"\n"+sqlError(); tm("SQLCode: " +GString(sqlca.sqlcode));}
+    EXEC SQL CLOSE cur3;
+    tm("GetID: ...Lines Done. Lines: "+GString(lns));
+    free_da(sqldaptr);
+    tm("GetID: *************** Ending.");
+    return retString;
+}
+
+
+short dsqlobj::countOccurrences(GString table, struct sqlda * sqldaptr, QListBox * aLB, short autoDel)
+{
+    GString command, line, delFilter;
+    unsigned long nol, i, cols;
+
+    command    = "SELECT COUNT (*) FROM "+table+" WHERE ";
+    delFilter  = "SELECT * FROM "+table+" WHERE ";
+    line    = "Row: ";
+
+    cols = sqldaptr->sqld;
+    GString colName, colData;
+
+    for(i = 0; i < cols;++i) //anzahl der Spalten
+    {
+        colName = GString(sqldaptr->sqlvar[i].sqlname.data);
+        if ( (sqldaptr->sqlvar[i].sqltype & 1)
+             && *(sqldaptr->sqlvar[i].sqlind) < 0 ) colData = " IS NULL";
+        else
+        {
+            colData = setFldData(sqldaptr, i );
+            convToSQL( colData );
+            colData = "="+colData;
+        }
+
+        command    += colName+colData+" AND ";
+        delFilter  += colName+colData+" AND ";
+        line += colName+colData+" | ";
+    }
+    command   = command.strip(" AND ");
+    delFilter = delFilter.strip(" AND ");
+    line    = line.strip(" | ");
+    tm("GetCnt: Command: "+command);
+    nol = countLines(command);
+    if( nol > 1 )
+    {
+        writeToLB( aLB, table +": Found "+GString(nol)+" times "+line );
+    }
+    tm(line+", Count: "+GString(nol));
+
+    for( i=1; i<nol && autoDel && !iStop; ++i)
+    {
+        tm("DELETING: "+delFilter);
+        currentCursor(delFilter, "DELETE FROM "+table, 1, 0);
+        EXEC SQL COMMIT;
+    }
+    //   if( countLines(command) > 1 ){ }//write to ListBox
+    return 0;
+}
+
+void dsqlobj::writeToLB(QListBox * aLB, GString message)
+{
+    if( aLB->findItem((char*) message) > 0 ) return;
+    aLB->insertItem(message);
+}
+
+#endif
+/*********************************************************/
+/*********************************************************/
+/*********************************************************/
+/********** END QT RELATED THINGS ************************/
+/********** END LARGE IFDEF!  ****************************/
+/*********************************************************/
+/*********************************************************/
+/*********************************************************/
+void dsqlobj::setCLOBReader(short readCLOBData )
+{
+    m_iReadCLOBs = readCLOBData;
+}
+
+signed long dsqlobj::countLines(GString message)
+{
+
+    struct sqlda * sqldaptr = NULL;
+    long erc = 0;
+    GString fldData, hostVar;
+
+    //Allocate with one column i.e. init_da(1)
+    if ( init_da(&sqldaptr, 1) ) return 0;
+    strcpy(stmt, message);
+    EXEC SQL PREPARE cnStat FROM :stmt;
+    if (sqlca.sqlcode ) return 0;
+    sqldaptr->sqln=1;
+    EXEC SQL DESCRIBE cnStat INTO :*sqldaptr;
+
+    //Now initialize again....
+    short cols = sqldaptr->sqld;
+    short doubleIt = 1;
+    if( (sqlca.sqlcode > 236 && sqlca.sqlcode < 240) || doubleIt ) cols *= 2; //BLOBS !!
+
+    if( init_da(&sqldaptr, cols) ) return 0;
+
+    EXEC SQL DESCRIBE cnStat INTO :*sqldaptr;
+    if (sqlca.sqlcode != 0)
+    {
+        free_da(sqldaptr);
+        tm("::countLines, errDesc");
+        return 0;
+    }
+
+    if( alloc_host_vars(sqldaptr) )
+    {
+        free_da(sqldaptr);
+        tm("::countLines, errALLOC");
+        return 0;
+    }
+
+    EXEC SQL DECLARE cnCur CURSOR FOR cnStat;
+    EXEC SQL OPEN cnCur;
+
+    if (sqlca.sqlcode ) return 0;
+    tm("CNT: Starting Lines...Now...");
+    tm("FldData before while: "+fldData);
+    while (sqlca.sqlcode == 0 && !iStop ) //Read all Lines
+    {
+        tm("In while, fetching cnCur...");
+        EXEC SQL FETCH cnCur USING DESCRIPTOR :*sqldaptr;
+        if( sqlca.sqlcode ) break;
+        if ( (sqldaptr->sqlvar[0].sqltype & 1) && *(sqldaptr->sqlvar[0].sqlind) < 0 )  fldData = "NULL";
+        else fldData = setFldData(sqldaptr, 0 );
+        tm("in while, FldData: "+fldData);
+    }
+    if(sqlca.sqlcode && sqlca.sqlcode != 100) erc = sqlca.sqlcode;
+    EXEC SQL CLOSE cnCur;
+    if( sqldaptr ) free_da(sqldaptr);
+    if( erc ) return 0;
+    tm("countLines::FldData: "+fldData+"<-");
+    return fldData.asLong();
+}
+
+/************************* Cursor ***********************************/
+signed long dsqlobj::openRS(GString message)
+{
+    hostVarSeq.removeAll();
+    sqlTypeSeq.removeAll();
+    sqlVarLengthSeq.removeAll();
+    sqlIndVarSeq.removeAll();
+    sqlForBitSeq.removeAll();
+    GRowHdl * aLine;
+
+    short indVar;
+    unsigned long i;
+
+    tm("openRS: Clearing allRowsSeq....Elements: "+GString(allRowsSeq.numberOfElements()));
+    while( !allRowsSeq.isEmpty() )
+    {
+        aLine = allRowsSeq.firstElement();
+        delete aLine;
+        allRowsSeq.removeFirst();
+    }
+    tm("openRS: ..allRowsSeq Cleared.");
+
+    tm("OpenRS Start.");
+    rsOK = 0;
+
+    //Allocate with one column i.e. init_da(1)
+    if ( init_da(&_crsSqldaptr, 1) ) return sqlca.sqlcode;
+    strcpy(stmt, message);
+    EXEC SQL PREPARE crsST FROM :stmt;
+    if (sqlca.sqlcode ) return sqlca.sqlcode;
+    _crsSqldaptr->sqln=1;
+    EXEC SQL DESCRIBE crsST INTO :*_crsSqldaptr;
+    tm("OpenRS, reInit...");
+    //Now initialize again....
+    short cols = _crsSqldaptr->sqld;
+    int doubleIt = 1;
+    if( (sqlca.sqlcode > 236 && sqlca.sqlcode < 240) || doubleIt) cols *= 2; //BLOBS !!
+
+    if( init_da(&_crsSqldaptr, cols) ) return sqlca.sqlcode;
+    tm("OpenRS: Describing");
+    EXEC SQL DESCRIBE crsST INTO :*_crsSqldaptr;
+    if (sqlca.sqlcode != 0) return sqlca.sqlcode;
+    if( alloc_host_vars(_crsSqldaptr) ) return sqlca.sqlcode;
+    tm("OpenRS: Opening CRS");
+    EXEC SQL DECLARE rsCur CURSOR WITH HOLD FOR crsST;
+    //EXEC SQL DECLARE rsCur CURSOR FOR crsST;
+    EXEC SQL OPEN rsCur;
+    tm("OpenRS: End");
+    //HOSTVARIABLE + LENGTH + INDIKATOR VARIABLE
+    tm("OpenRS: Setting Cols, ColCount "+GString(iNumberOfColumns));
+
+    iNumberOfColumns =  _crsSqldaptr->sqld;
+    iNumberOfRows   = 1;
+    tm("OpenRS: NumberOfCols: "+GString(iNumberOfColumns));
+    if( hostVarSeq.numberOfElements() == 0 ) //Do this only once...
+    {
+        for(i=0; i<iNumberOfColumns;++i)
+        {
+            tm("OpenRS: Col["+GString(i)+"]: "+GString(_crsSqldaptr->sqlvar[i].sqlname.data));
+            hostVarSeq.add(_crsSqldaptr->sqlvar[i].sqlname.data);
+            sqlTypeSeq.add(_crsSqldaptr->sqlvar[i].sqltype);
+            sqlVarLengthSeq.add(_crsSqldaptr->sqlvar[i].sqllen);
+            if ( (_crsSqldaptr->sqlvar[i].sqltype & 1) && *(_crsSqldaptr->sqlvar[i].sqlind) < 0 )
+            {
+                indVar = *(_crsSqldaptr->sqlvar[i].sqlind);
+                sqlIndVarSeq.add( indVar );
+            }
+            else sqlIndVarSeq.add( 1 );
+        }
+    }
+
+    if( !sqlca.sqlcode )  rsOK = 1;
+    return sqlca.sqlcode;
+}
+
+
+signed long dsqlobj::getNextRS(short col, GString &value)
+{
+    tm("NextRS Start...col: "+GString(col));
+    if( !rsOK )
+    {
+        value = "@RSnotInitialized";
+        return -1;
+    }
+    if( col < 1 || col > _crsSqldaptr->sqld )
+    {
+        value = "@GetRS: Col OutOfReach";
+        return -2;
+    }
+    signed long erc = 0;
+    GString fldData;
+    EXEC SQL FETCH rsCur USING DESCRIPTOR :*_crsSqldaptr;
+    if( sqlca.sqlcode )
+    {
+        closeRS();
+        value = "@CouldNotFetchRS";
+        return sqlca.sqlcode;
+    }
+    tm("NextRS: getting fldData...");
+    if ( (_crsSqldaptr->sqlvar[col-1].sqltype & 1)  && *(_crsSqldaptr->sqlvar[col-1].sqlind) < 0 )  fldData = "NULL";
+    else fldData = setFldData(_crsSqldaptr, col-1 );
+
+
+    tm("NextRS, Data: "+fldData);
+    if(sqlca.sqlcode && sqlca.sqlcode != 100)
+    {
+        erc = sqlca.sqlcode;
+        EXEC SQL CLOSE rsCur;
+        free_da(_crsSqldaptr);
+        rsOK = 0;
+        value = "@GetRS: Error "+GString(erc);
+        return erc;
+    }
+    value = fldData;
+    tm("NextRS, end.");
+    return 0;
+}
+
+signed long dsqlobj::nextRS()
+{
+    tm("nextRS Start...");
+    GRowHdl * aLine;
+
+    unsigned long i;
+    tm("nextRS: Clearing allRowsSeq....Elements: "+GString(allRowsSeq.numberOfElements()));
+    while( !allRowsSeq.isEmpty() )
+    {
+        aLine = allRowsSeq.firstElement();
+        delete aLine;
+        allRowsSeq.removeFirst();
+    }
+    tm("nextRS: ..allRowsSeq Cleared.");
+
+    if( !rsOK )
+    {
+        return -1;
+    }
+    signed long erc = 0;
+    GString fldData;
+    EXEC SQL FETCH rsCur USING DESCRIPTOR :*_crsSqldaptr;
+    if( sqlca.sqlcode )
+    {
+        tm("Fetching failed: "+GString(sqlca.sqlcode));
+        rsOK = 0;
+        closeRS();
+        return sqlca.sqlcode;
+    }
+    tm("NextRS: getting fldData...");
+
+
+    aLine = new GRowHdl;
+
+    for(i=0; i<iNumberOfColumns;++i)
+    {
+        if ( (_crsSqldaptr->sqlvar[i].sqltype & 1)
+             && *(_crsSqldaptr->sqlvar[i].sqlind) < 0 )  fldData = "NULL";
+        else fldData = setFldData(_crsSqldaptr, i);
+        tm("NextRS, Data: "+fldData);
+        aLine->addElement(fldData);
+    }
+    allRowsSeq.add( aLine );
+
+    if(sqlca.sqlcode && sqlca.sqlcode != 100)
+    {
+        tm("NextRS: getting fldData...");
+        erc = sqlca.sqlcode;
+        EXEC SQL CLOSE rsCur;
+        free_da(_crsSqldaptr);
+        rsOK = 0;
+        return erc;
+    }
+
+    tm("nextRS, end.");
+    return 0;
+}
+
+signed long dsqlobj::closeRS()
+{
+    if( !rsOK ) return 0;
+    EXEC SQL CLOSE rsCur;
+    free_da(_crsSqldaptr);
+    return sqlca.sqlcode;
+}
+
+GString dsqlobj::getRS( short col)
+{
+    //Overload 1
+    if( allRowsSeq.numberOfElements() < 1 ) return "@OutOfReach";
+    GRowHdl *aRow;
+    aRow = allRowsSeq.elementAtPosition(1);
+    if( (unsigned long) col > aRow->elements() ) return "@OutOfReach";
+    return aRow->rowElementData(col);
+}
+
+GString dsqlobj::getRS( const GString& hostVar)
+{
+    //Overload 2
+    unsigned long pos;
+    if( allRowsSeq.numberOfElements() < 1 ) return "@OutOfReach";
+    GRowHdl *aRow;
+    aRow = allRowsSeq.elementAtPosition(1);
+    pos = positionOfHostVar(hostVar);
+    if( pos < 1 || pos > aRow->elements() ) return "OutOfReach";
+    return aRow->rowElementData(pos);
+}
+
+int dsqlobj::uploadLongBuffer( GString cmd, GString data, int isBinary )
+{
+    /*
+     http://www-01.ibm.com/support/knowledgecenter/SSEPGG_9.7.0/com.ibm.db2.luw.sql.ref.doc/doc/r0001030.html?cp=SSEPGG_9.7.0%2F2-10-11-1
+    When connecting to a host database, sqlname can be set to indicate a FOR BIT DATA string as follows:
+
+        The sixth byte of the SQLDAID in the SQLDA header is set to '+'
+        The length of sqlname is 8
+        The first two bytes of sqlname are X'0000'
+        The third and fourth bytes of sqlname are X'0000'
+        The remaining four bytes of sqlname are reserved and should be set to X'00000000'
+
+    When working with XML data, sqlname can be set to indicate an XML subtype as follows:
+
+        The length of sqlname is 8
+        The first two bytes of sqlname are X'0000'
+        The third and fourth bytes of sqlname are X'0000'
+        The fifth byte of sqlname is X'01'
+        The remaining three bytes of sqlname are reserved and should be set to X'000000'
+
+    */
+
+    tm("UploadLongBuf: "+cmd);
+    int size = data.length();
+    if( isBinary )size = data.length()/2;
+    tm("Start upload...");
+    strcpy(sqlCommand, cmd);
+    short vars = 1;
+    tm(data);
+    tm("Size: "+GString(data.length())+", bin: "+GString(isBinary));
+
+    unsigned char * buf = new unsigned char[size+1];
+    buf[size] = 0;
+
+    short unsigned int ch;
+    for(int i = 0 ; i < size; ++i )
+    {
+        sscanf((char*)data.subString(1+i*2, 2), "%2hx", &ch );
+        buf[i] = ch;
+    }
+    //We have only one parameter marker and we're updating one column only
+    int col = 0;
+
+    struct sqlda *sqlDA;
+    tm("Files: "+GString(vars));
+    sqlDA = (struct sqlda *) malloc (SQLDASIZE(vars));
+    memset(sqlDA, 0, sizeof(sqlda));
+    strncpy(sqlDA->sqldaid, "SQLDA   ", sizeof (sqlDA->sqldaid));
+    /*
+    strncpy(sqlDA->sqldaid, "SQLDA+  ", sizeof (sqlDA->sqldaid));
+    sqlDA->sqlvar[col].sqlname.length = 8;
+    memcpy(sqlDA->sqlvar[col].sqlname.data, "\x00\x00\x00\x00\xFF\xFF\xFF\xFF",sqlDA->sqlvar[col].sqlname.length);
+    */
+
+    sqlDA->sqldabc = (long)SQLDASIZE(vars);
+    sqlDA->sqln = vars;
+    sqlDA->sqld = vars;
+    short ind = 0;
+    if( isBinary )
+    {
+        sqlDA->sqlvar[col].sqltype =  SQL_TYP_VARCHAR; //SQL_TYP_VARBINARY; //OK: SQL_TYP_LONG;//SQL_TYP_CSTR;//SQL_TYP_VARBINARY; //SQL_TYP_LONG; //OK: SQL_TYP_CSTR; //SQL_TYP_NLONG;
+        sqlDA->sqlvar[col].sqllen = size;
+        sqlDA->sqlvar[col].sqldata = (char*)buf;
+        sqlDA->sqlvar[col].sqlind = &ind;
+    }
+    else
+    {
+        sqlDA->sqlvar[col].sqltype =  SQL_TYP_CSTR; //SQL_TYP_VARBINARY; //OK: SQL_TYP_LONG;//SQL_TYP_CSTR;//SQL_TYP_VARBINARY; //SQL_TYP_LONG; //OK: SQL_TYP_CSTR; //SQL_TYP_NLONG;
+        sqlDA->sqlvar[col].sqllen = size;
+        sqlDA->sqlvar[col].sqldata = data;
+        sqlDA->sqlvar[col].sqlind = &ind;
+    }
+    
+
+    tm("pos1");
+    EXEC SQL  PREPARE stmt1 FROM :sqlCommand;
+    tm("pos2, SQLCODE: "+GString(SQLCODE));
+    if (SQLCODE && SQLCODE < 0 )
+    {
+        iErrCode = SQLCODE;
+        //Do not free sqlda on -104
+        if( SQLCODE != -104) free_da(sqlDA);
+        return SQLCODE;
+    }
+    tm("pos3");
+    EXEC SQL   EXECUTE stmt1 USING DESCRIPTOR :*sqlDA;
+    if (SQLCODE && SQLCODE < 0)
+    {
+        iErrCode = SQLCODE;
+        tm("CODE: "+GString(SQLCODE)+", err: "+sqlError());
+        return SQLCODE;
+    }
+    tm("pos4");
+    EXEC SQL COMMIT;
+    delete [] buf;
+    //free_da(sqlDA); ///free_da crashes sometimes, should test in non-debug mode
+    //Better: Just free sqlDA: We didn't actually set data, so no need to call free_da(...)
+    free (sqlDA);
+
+    tm("Done upload");
+    return 0;
+
+}
+/***************************************
+*
+***************************************/
+int dsqlobj::prepSQLDAForLOBs(struct SomeLOBFile *pLobFile, struct sqlda **sqlDA, GString fileName, int lobType, int col)
+{
+    tm("prepSQLDAForLOBs, file: "+fileName+", type: "+GString(lobType)+", in col: "+GString(col));
+
+
+    strncpy(pLobFile->name, fileName, sizeof(pLobFile->name));
+    pLobFile->name_length = strlen(pLobFile->name);
+    pLobFile->file_options = SQL_FILE_READ;
+    switch(lobType)
+    {
+    case SQL_TYP_BLOB_FILE_OBSOLETE:
+    case SQL_TYP_BLOB_LOCATOR+400:
+        (*sqlDA)->sqlvar[col].sqltype = SQL_TYP_BLOB_FILE;
+        break;
+    case SQL_TYP_CLOB_LOCATOR+400:
+    case SQL_TYP_CLOB_FILE_OBSOLETE:
+    case SQL_TYP_XML+400:
+    case SQL_TYP_XML:
+        (*sqlDA)->sqlvar[col].sqltype = SQL_TYP_CLOB_FILE;
+        break;
+    case SQL_TYP_DBCLOB_FILE_OBSOLETE:
+    case SQL_TYP_DBCLOB_LOCATOR+400:
+        (*sqlDA)->sqlvar[col].sqltype = SQL_TYP_DBCLOB_FILE;
+        break;
+    default:
+        (*sqlDA)->sqlvar[col].sqltype =  lobType;
+        break;
+    }
+    (*sqlDA)->sqlvar[col].sqllen = 267;
+    (*sqlDA)->sqlvar[col].sqldata = (char*) pLobFile;
+    (*sqlDA)->sqlvar[col].sqlind = 0L;
+
+    return 0;
+}
+
+void dsqlobj::cleanLobFileSeq(GSeq<SomeLOBFile *> *lobFileSeq)
+{
+    tm("Cleaning LobFileSeq....");
+    SomeLOBFile * pLobFile;
+    while( lobFileSeq->numberOfElements() )
+    {
+        //tm("Cleaning LobFileSeq (1)");
+        pLobFile = lobFileSeq->firstElement();
+        //tm("Cleaning LobFileSeq (2)");
+        lobFileSeq->removeFirst();
+        //tm("Cleaning LobFileSeq (3)");
+        delete pLobFile;
+        //tm("Cleaning LobFileSeq (4)");
+    }
+    tm("Cleaning LobFileSeq....done.");
+}
+
+long dsqlobj::uploadBlob( GString cmd, GSeq <GString> *fileList, GSeq <long> *lobType )
+{
+
+    tm("UploadBlob: "+cmd);
+
+    tm("Start upload...");
+    //myFile * blobSrc;
+    //someLOBFile blobSrc;
+    strcpy(sqlCommand, cmd);
+
+
+    short vars = fileList->numberOfElements();
+    tm("UploadBlob: Files: "+GString(vars)+", types: "+GString(lobType->numberOfElements()));
+
+    ///Set LOBs: Paths and types
+    struct sqlda *sqlDA;
+
+    if(fileList->numberOfElements() == 0 || lobType->numberOfElements() == 0 ) return -1;
+
+    tm("UploadBlob: Lists are OK");
+    sqlDA = (struct sqlda *) malloc (SQLDASIZE(vars));
+    memset(sqlDA, 0, sizeof(sqlda));
+    strncpy(sqlDA->sqldaid, "SQLDA   ", sizeof (sqlDA->sqldaid));
+    sqlDA->sqldabc = (long)SQLDASIZE(vars);
+    sqlDA->sqln = vars;
+    sqlDA->sqld = vars;
+    
+
+    GSeq <SomeLOBFile*> lobFileStructSeq;
+    struct SomeLOBFile * pLobFile;
+    for( unsigned long i = 1; i <= fileList->numberOfElements() && i <= lobType->numberOfElements(); ++i )
+    {
+        pLobFile = (struct SomeLOBFile*) malloc(sizeof(SomeLOBFile)); //new SomeLOBFile;
+        lobFileStructSeq.add(pLobFile);
+        tm("UploadBlob, file "+GString(i)+": prepping SQLDA w/ type "+GString(lobType->elementAtPosition(i) / 2 * 2 + 400));
+        prepSQLDAForLOBs( pLobFile, &sqlDA, fileList->elementAtPosition(i), lobType->elementAtPosition(i) / 2 * 2 + 400 , i-1);
+    }
+
+
+    tm("pos5");
+    EXEC SQL  PREPARE stmt1 FROM :sqlCommand;
+    tm("pos5, SQLCODE: "+GString(SQLCODE));
+    if (SQLCODE && SQLCODE < 0 )
+    {
+        //Do not free sqlda on -104
+        iErrCode = SQLCODE;
+        if( SQLCODE != -104)
+        {
+            free_da(sqlDA);
+            //NOTE TO SELF: freeing sqlda invalidates all pointers, do not call cleanLobFileSeq
+            //cleanLobFileSeq(&lobFileStructSeq);
+        }
+        tm("pos5A, SQLCODE to return: "+GString(SQLCODE));
+        return SQLCODE;
+    }
+    tm("pos6");
+    EXEC SQL   EXECUTE stmt1 USING DESCRIPTOR :*sqlDA;
+    if (SQLCODE && SQLCODE < 0)
+    {
+        tm("pos6Err");
+        iErrCode = SQLCODE;
+        tm("CODE: "+GString(SQLCODE)+", err: "+sqlError());
+        free_da(sqlDA);
+        //cleanLobFileSeq(&lobFileStructSeq);
+        return SQLCODE;
+    }
+    tm("pos7");
+    EXEC SQL COMMIT;
+    free_da(sqlDA); ///free_da crashes sometimes, should test in non-debug mode
+    //Better: Just free sqlDA: We didn't actually set data, so no need to call free_da(...)
+    //free (sqlDA);
+    //cleanLobFileSeq(&lobFileStructSeq);
+    tm("Done upload");
+    return 0;
+    /*************************************** For some reason, this stopped working under Linux/DB2 v10.0.1 NOTE: possibly due to debug mode on glengineQT.pro.
+ * Code above works though.
+ * Apparently "typedef struct" and (char*) [&]blobSrc is the culprit.
+ *
+
+tm("UploadBlob: "+cmd);
+  tm("Start upload...");
+   //myFile * blobSrc;
+   strcpy(sqlCommand, cmd);
+
+   myFile blobSrc;
+   short vars = fileList->numberOfElements();
+ tm("Files: "+GString(vars));
+   struct sqlda *sqlDA = (struct sqlda *) malloc (SQLDASIZE(vars));
+   strncpy((sqlDA)->sqldaid, "SQLDA   ", sizeof ((sqlDA)->sqldaid));
+   (sqlDA)->sqldabc = (long)SQLDASIZE(vars);
+   (sqlDA)->sqln = vars;
+   (sqlDA)->sqld = vars;
+
+   for( short i=1; i <= vars; ++i )
+   {
+       tm("File["+GString(i)+"]: "+fileList->elementAtPosition(i)+", Typ: "+GString(lobType->elementAtPosition(i)));
+       //blobSrc = new myFile;
+       strcpy(blobSrc.name, fileList->elementAtPosition(i));
+       blobSrc.name_length = strlen(blobSrc.name);
+       blobSrc.file_options = SQL_FILE_READ;
+       tm("Type: "+GString(lobType->elementAtPosition(i)));
+       switch(lobType->elementAtPosition(i))
+       {
+          case 1360:
+            sqlDA->sqlvar[i-1].sqltype = SQL_TYP_BLOB_FILE;
+            break;
+          case 1364:
+            sqlDA->sqlvar[i-1].sqltype = SQL_TYP_CLOB_FILE;
+            break;
+          case 1368:
+            sqlDA->sqlvar[i-1].sqltype = SQL_TYP_DBCLOB_FILE;
+            break;
+          default:
+            sqlDA->sqlvar[i-1].sqltype = SQL_TYP_BLOB_FILE;
+            //sqlDA->sqlvar[i-1].sqltype = 917; //SQL_TYP_CLOB_FILE; //405;
+            //SQL_TYP_NXML:
+            break;
+       }
+       sqlDA->sqlvar[i-1].sqllen = 267;
+       sqlDA->sqlvar[i-1].sqldata = (char*) &blobSrc;
+       sqlDA->sqlvar[i-1].sqlind = 0L;
+tm("pos4");
+   }
+
+tm("pos5");
+   EXEC SQL
+       PREPARE stmt1 FROM :sqlCommand;
+   tm("pos5, SQLCODE: "+GString(SQLCODE));
+   if (SQLCODE)
+   {
+      free_da(sqlDA);
+      return SQLCODE;
+   }
+tm("pos6");
+   EXEC SQL
+       EXECUTE stmt1 USING DESCRIPTOR :*sqlDA;
+   if (SQLCODE)
+   {
+tm("CODE: "+GString(SQLCODE)+", err: "+sqlError());
+      return SQLCODE;
+   }
+tm("pos7");
+   EXEC SQL COMMIT;
+   //!!free_da(sqlDA);
+   tm("Done upload");
+   return 0;
+***************************************************/
+}
+
+long dsqlobj::uploadBlob( GString cmd, char * buffer , long size )
+{
+    tm("::uploadBlob from buf start, cmd: "+cmd);
+    strcpy(sqlCommand, cmd);
+
+
+    struct sqlda *sqlDA = (struct sqlda *) malloc (SQLDASIZE(1));
+    strncpy((sqlDA)->sqldaid, "SQLDA   ", sizeof ((sqlDA)->sqldaid));
+    (sqlDA)->sqldabc = (long)SQLDASIZE(1);
+    (sqlDA)->sqln = 1;
+    (sqlDA)->sqld = 1;
+
+    SETSQLDOUBLED(sqlDA, SQLDOUBLED);
+    //sqlDA->sqlvar[0].sqltype = SQL_TYP_BLOB;
+    sqlDA->sqlvar[0].sqltype = SQL_TYP_CLOB;
+    //    sqlDA->sqlvar[0].sqllen = size;
+    SETSQLDALONGLEN(sqlDA, 0, size);
+    tm("::uploadBlob setting data, size: "+GString(size));
+    sqlDA->sqlvar[0].sqldata = (char*) buffer;
+
+
+    tm("Preparing...");
+    EXEC SQL
+            PREPARE stmt1 FROM :sqlCommand;
+    if (SQLCODE) return SQLCODE;
+
+    tm("Executing...");
+    EXEC SQL
+            EXECUTE stmt1 USING DESCRIPTOR :*sqlDA;
+    if (SQLCODE) return SQLCODE;
+
+    EXEC SQL COMMIT;
+
+    return 0;
+
+}
+
+/*************************************************************************
+*Todo: Alloc for indicator!
+*************************************************************************/
+long dsqlobj::retrieveBlob( GString cmd, GString &blobFile, int writeFile )
+{
+
+    /********************************************************
+   * writeFile == 0: Read LOB into memory
+   * used by "Generate DDL"
+   */
+    int outSize;
+    if( writeFile ) return descriptorToFile(cmd, blobFile, &outSize );
+
+    short erc, idx = 0;
+    short numberOfLobColumns = 1;
+    short sqlDAVars = 2 * numberOfLobColumns;
+    long *lenptr;
+    int length;
+    tm("BlobCmd: "+cmd);
+    struct sqlda *loc_sqlDA = (struct sqlda *) malloc (SQLDASIZE(sqlDAVars));
+    strncpy((loc_sqlDA)->sqldaid, "SQLDA   ", sizeof ((loc_sqlDA)->sqldaid));
+    (loc_sqlDA)->sqldabc = (long)SQLDASIZE(sqlDAVars);
+    (loc_sqlDA)->sqln = sqlDAVars;
+    (loc_sqlDA)->sqld = 0;
+
+    tm("retrieveBlob: SQLDOUBLED before set: "+GString(GETSQLDOUBLED(loc_sqlDA)));
+    SETSQLDOUBLED(loc_sqlDA, SQLDOUBLED);
+    tm("retrieveBlob: SQLDOUBLED after set: "+GString(GETSQLDOUBLED(loc_sqlDA)));
+    //Step 2: Prepare the statement...
+    strcpy(sqlGetBlob, cmd);
+    EXEC SQL PREPARE stmt2 FROM :sqlGetBlob;
+    tm("retrieveBlob: rc after prep: "+GString(SQLCODE));
+    if (SQLCODE) return SQLCODE;
+
+    //Step 3: Describe the statement into the sqlDA
+    EXEC SQL DESCRIBE stmt2 INTO :*loc_sqlDA;
+    tm("retrieveBlob: rc after desc: "+GString(SQLCODE));
+    if (SQLCODE) return SQLCODE;
+
+    //Step 4: Calculate memory...
+    long longmemsize =0;
+    unsigned int memsize =0;
+    longmemsize = GETSQLDALONGLEN(loc_sqlDA, idx);
+#if defined(DB2WIN)
+    memsize = (unsigned int) (min(longmemsize, 64000));
+    SETSQLDALONGLEN(sqlDA, idx, memsize);
+#else
+
+    if( longmemsize == 2147483647 )
+    {
+        memsize = (unsigned int) (min(longmemsize, 64000));
+        SETSQLDALONGLEN(loc_sqlDA, idx, memsize);
+    }
+    else memsize = longmemsize;
+#endif
+    loc_sqlDA->sqlvar[idx].sqldata = (char *SQL_POINTER) malloc (memsize);
+    if( loc_sqlDA->sqlvar[idx].sqldata == NULL )
+    {
+        tm("retrieveBlob: CANNOT ALLOCATE MEM!");
+        iErrCode = -1;
+        return iErrCode;
+    }
+
+    //!!CHECK ALLOCERRORS!!!!!!!
+    if ( loc_sqlDA->sqlvar[idx].sqltype & 1 )
+    {
+        tm("retrieveBlob: allocating...");
+        loc_sqlDA->sqlvar[idx].sqlind = (short *)malloc(sizeof(short));
+        memset(loc_sqlDA->sqlvar[idx].sqlind,'\0',sizeof(short));
+    }
+    tm("retrieveBlob: Not allocating...");
+    EXEC SQL DECLARE blobCRS CURSOR FOR stmt2;
+    tm("retrieveBlob: rc after decl: "+GString(SQLCODE));
+    if (SQLCODE)
+    {
+        iErrCode = SQLCODE;
+        free(loc_sqlDA);
+        return iErrCode;
+    }
+
+    EXEC SQL OPEN blobCRS;
+    tm("retrieveBlob: rc after open: "+GString(SQLCODE));
+    if (SQLCODE)
+    {
+        iErrCode = SQLCODE;
+        free(loc_sqlDA);
+        return iErrCode;
+    }
+
+    EXEC SQL FETCH blobCRS USING DESCRIPTOR :*loc_sqlDA;
+    tm("retrieveBlob: rc after fetch: "+GString(SQLCODE));
+    if (SQLCODE)
+    {
+        iErrCode = SQLCODE;
+        free(loc_sqlDA);
+        return iErrCode;
+    }
+    lenptr = (long *)GETSQLDALENPTR(loc_sqlDA, idx);
+
+    if (lenptr == NULL)
+    {
+        length = ((struct lob *) (loc_sqlDA->sqlvar[idx].sqldata))->length;
+        tm("Len: "+GString(length));
+    }
+    else length = *lenptr;
+    tm("Length: "+GString(length));
+
+    erc = 0;
+    if( !writeFile )
+    {
+        //the 2nd/inner (char*) cast is necessary on 64bit Linux
+        tm("set blobFile to GString, length: "+GString(length));
+        blobFile = GString((char*) ((char*)(loc_sqlDA->sqlvar[idx].sqldata)+4), length);
+
+        tm("set blobFile to GString DONE");
+    }
+    else erc = writeToFile(loc_sqlDA->sqlvar[idx].sqldata, length, blobFile);
+    tm("retrieveBlob: closing crs..");
+
+    EXEC SQL CLOSE blobCRS;
+    if (SQLCODE) iErrCode = SQLCODE;
+    tm("retrieveBlob: Done. erc: "+GString(erc));
+    free_da(loc_sqlDA);
+    return erc;
+}
+
+/*************************************************************************
+*
+*************************************************************************/
+short dsqlobj::writeToFile(char* ptr, long length, GString fileName)
+{
+
+#if defined(MAKE_VC)
+    int fh;
+    if(( fh = open( fileName, O_BINARY | O_RDWR | O_CREAT , S_IREAD | S_IWRITE))  ==  -1 ) return 1;
+    _write( fh, ptr+4, length );
+    close( fh );
+#elif defined (__MINGW32__)
+    FILE *fp;
+    fp = fopen(fileName, "wb");
+    fwrite(ptr+4, sizeof(char), length, fp);
+    fclose(fp);
+#else
+    FILE *fOut;
+    if( (fOut = fopen(fileName, "w")) == NULL) return 1;
+    fwrite(ptr+4, sizeof(char), length, fOut);
+    fclose(fOut);
+#endif
+    return 0;
+}
+
+/*************************************************************************
+*
+*************************************************************************/
+int dsqlobj::getSysTables()
+{   
+    this->initAll("SELECT TABSCHEMA, TABNAME FROM SYSCAT.TABLES ORDER BY TABSCHEMA, TABNAME");
+    if( iNumberOfRows == 0 ) this->initAll("SELECT CREATOR, NAME FROM SYSIBM.SYSTABLES ORDER BY CREATOR, NAME");
+    if( iNumberOfRows == 0 ) this->initAll("SELECT TNAME, CREATOR FROM SYSTEM.SYSCATALOG ORDER BY TNAME, CREATOR");
+    return 0;
+}
+/*************************************************************************
+*
+*************************************************************************/
+int dsqlobj::getTabSchema()
+{
+    this->initAll("SELECT DISTINCT(TABSCHEMA) FROM SYSCAT.TABLES ORDER BY TABSCHEMA");
+    if( iNumberOfRows == 0 ) this->initAll("SELECT DISTINCT(CREATOR) FROM SYSIBM.SYSTABLES ORDER BY CREATOR");
+    if( iNumberOfRows == 0 ) this->initAll("SELECT DISTINCT(CREATOR) FROM SYSTEM.SYSCATALOG ORDER BY CREATOR");
+    return 0;
+}
+/*************************************************************************
+*
+*************************************************************************/
+int dsqlobj::getTables(GString schema)
+{
+    /*
+    if( schema == "*")
+    {
+        this->initAll("SELECT concat(concat(trim(tabschema), '.'), tabname) FROM SYSCAT.TABLES ORDER BY tabschema, TABNAME");
+        if( iNumberOfRows == 0 ) this->initAll("SELECT NAME FROM SYSIBM.SYSTABLES ORDER BY NAME");
+        if( iNumberOfRows == 0 ) this->initAll("SELECT TNAME FROM SYSTEM.SYSCATALOG ORDER BY TNAME");
+        return 0;
+    }
+    */
+    this->initAll("SELECT TABNAME FROM SYSCAT.TABLES WHERE TABSCHEMA='"+schema+"' ORDER BY TABNAME");
+    if( iNumberOfRows == 0 ) this->initAll("SELECT NAME FROM SYSIBM.SYSTABLES WHERE CREATOR='"+schema+"' ORDER BY NAME");
+    if( iNumberOfRows == 0 ) this->initAll("SELECT TNAME FROM SYSTEM.SYSCATALOG WHERE CREATOR='"+schema+"' ORDER BY TNAME");
+
+    return 0;
+}
+/*************************************************************************
+*
+*************************************************************************/
+int dsqlobj::checkHistTable()
+{
+    this->initAll("SELECT COUNT(*) FROM SYSCAT.TABLES WHERE TABSCHEMA='PMF' AND TABNAME='HISTORY'");
+    if( rowElement(1,1).asInt() > 0 ) return 1;
+
+    this->initAll("SELECT NAME FROM SYSIBM.SYSTABLES WHERE CREATOR='PMF' AND NAME='HISTORY'");
+    if( rowElement(1,1).asInt() > 0 ) return 1;
+
+    this->initAll("SELECT TNAME FROM SYSTEM.SYSCATALOG WHERE CREATOR='PMF' AND TNAME='HISTORY'");
+    if( rowElement(1,1).asInt() > 0 ) return 1;
+
+    return 0;
+}
+
+/*************************************************************************
+*
+*************************************************************************/
+int dsqlobj::forceApp(int appID)
+{
+    //sqluint32 appIDArr[1];
+    //appIDArr[0] = (sqluint32)appID;
+    sqluint32 aID = appID;
+    return sqlefrce( 1, &aID, SQL_ASYNCH, &sqlca );
+}
+
+GString dsqlobj::descriptorToFile( GString cmd, GString &blobFile, int *outSize )
+{
+    GString err = descriptorToFileNew(cmd, blobFile, outSize);
+    tm("descriptorToFile, err: "+err);
+    if( err.length() )
+    {
+        remove(blobFile);
+        GString err2 = descriptorToFileOld(cmd, blobFile, outSize);
+        tm("Falling back to descriptorToFileOld, err2: "+err2);
+        if( !err2.length() ) return "";
+    }
+    return err;
+}
+
+GString dsqlobj::descriptorToFileOld( GString cmd, GString &blobFile, int *outSize )
+{
+    short erc, idx = 0;
+    short numberOfLobColumns = 1;
+    short sqlDAVars = 2 * numberOfLobColumns;
+    long *lenptr;
+    int length;
+    tm("BlobCmd: "+cmd);
+    struct sqlda *sqlDA = (struct sqlda *) malloc (SQLDASIZE(sqlDAVars));
+    strncpy((sqlDA)->sqldaid, "SQLDA   ", sizeof ((sqlDA)->sqldaid));
+    (sqlDA)->sqldabc = (long)SQLDASIZE(sqlDAVars);
+    (sqlDA)->sqln = sqlDAVars;
+    (sqlDA)->sqld = 0;
+
+    tm("SQLDOUBLED before set: "+GString(GETSQLDOUBLED(sqlDA)));
+    SETSQLDOUBLED(sqlDA, SQLDOUBLED);
+    tm("SQLDOUBLED after set: "+GString(GETSQLDOUBLED(sqlDA)));
+    //Step 2: Prepare the statement...
+    strcpy(sqlGetBlob, cmd);
+    EXEC SQL PREPARE stmt4 FROM :sqlGetBlob;
+    iErrCode = SQLCODE;
+    if (SQLCODE) return (GString(SQLCODE)+": "+sqlError());
+
+    //Step 3: Describe the statement into the sqlDA
+    EXEC SQL DESCRIBE stmt4 INTO :*sqlDA;
+    iErrCode = SQLCODE;
+    if (SQLCODE) return (GString(SQLCODE)+": "+sqlError());
+
+    //Step 4: Calculate memory...
+    long longmemsize =0;
+    unsigned int memsize =0;
+    longmemsize = GETSQLDALONGLEN(sqlDA, idx);
+#if defined(DB2WIN)
+    memsize = (unsigned int) (min(longmemsize, 64000));
+    SETSQLDALONGLEN(sqlDA, idx, memsize);
+#else
+
+    if( longmemsize == 2147483647 )
+    {
+        memsize = (unsigned int) (min(longmemsize, 64000));
+        SETSQLDALONGLEN(sqlDA, idx, memsize);
+    }
+    else memsize = longmemsize;
+#endif
+    sqlDA->sqlvar[idx].sqldata = (char *SQL_POINTER) malloc (memsize);
+
+    //!!CHECK ALLOCERRORS!!!!!!!
+    if ( sqlDA->sqlvar[idx].sqltype & 1 )
+    {
+        sqlDA->sqlvar[idx].sqlind = (short *)malloc(sizeof(short));
+        memset(sqlDA->sqlvar[idx].sqlind,'\0',sizeof(short));
+    }
+    EXEC SQL DECLARE blobCRS4 CURSOR FOR stmt4;
+    iErrCode = SQLCODE;
+    if (SQLCODE)
+    {
+        free(sqlDA);
+        return (GString(SQLCODE)+": "+sqlError());
+    }
+
+    EXEC SQL OPEN blobCRS4;
+    iErrCode = SQLCODE;
+    if (SQLCODE)
+    {
+        free(sqlDA);
+        return (GString(SQLCODE)+": "+sqlError());
+    }
+
+    EXEC SQL FETCH blobCRS4 USING DESCRIPTOR :*sqlDA;
+    iErrCode = SQLCODE;
+    if (SQLCODE) return (GString(SQLCODE)+": "+sqlError());
+    lenptr = (long *)GETSQLDALENPTR(sqlDA, idx);
+
+    if (lenptr == NULL)
+    {
+        length = ((struct lob *) (sqlDA->sqlvar[idx].sqldata))->length;
+        tm("Len: "+GString(length));
+    }
+    else length = *lenptr;
+    tm("Length: "+GString(length));
+
+    erc = 0;
+    erc = writeToFile(sqlDA->sqlvar[idx].sqldata, length, blobFile);
+    tm("retrieveBlob: closing crs..");
+
+    EXEC SQL CLOSE blobCRS4;
+    iErrCode = SQLCODE;
+    if (SQLCODE) return (GString(SQLCODE)+": "+sqlError());
+    tm("retrieveBlob: Done. erc: "+GString(erc)+", sqlcode: "+GString(SQLCODE));
+    *outSize = length;
+    free(sqlDA);
+    return "";
+}
+
+
+/*************************************************************************
+*
+*************************************************************************/
+GString dsqlobj::descriptorToFileNew( GString cmd, GString &blobFile, int *outSize )
+{
+    *outSize = 0;
+    if( access(blobFile, 0) >= 0 )
+    {
+        if( remove(blobFile) ) return "Cannot access/overwrite "+blobFile;
+    }
+    GString error;
+
+    tm("desc2file: cmd: "+cmd+", file: "+blobFile);
+    /*************************************************
+   * sqlfile: Easier than "myFile" which I used previously.
+   */
+    struct sqlfile outFile;
+    outFile.data_length = 0;
+
+    strcpy(outFile.name, blobFile);
+    outFile.name_length = blobFile.length();
+    outFile.file_options = SQL_FILE_OVERWRITE;
+
+
+    /*************************************************
+   * Allocate sqlda, doubled for LOBs
+   * We allocate just one column!
+   */
+    short numberOfLobColumns = 1;
+    short sqlDAVars = 2 * numberOfLobColumns;
+    int idx = 0;      /*index of first and only column*/
+
+    struct sqlda *sqlDA = (struct sqlda *) malloc (SQLDASIZE(sqlDAVars));
+    strncpy((sqlDA)->sqldaid, "SQLDA   ", sizeof ((sqlDA)->sqldaid));
+    (sqlDA)->sqldabc = (long)SQLDASIZE(sqlDAVars);
+    (sqlDA)->sqln = sqlDAVars;
+    (sqlDA)->sqld = 0;
+
+    SETSQLDOUBLED(sqlDA, SQLDOUBLED);
+
+    /*************************************************
+   *  Prepare and descibe
+   */
+    strcpy(sqlGetBlob, cmd);
+    EXEC SQL PREPARE stmt3 FROM :sqlGetBlob;
+    //Ignore warnings
+    if (SQLCODE < 0)
+    {
+        free(sqlDA);
+        return GString(SQLCODE)+": "+sqlError();
+    }
+
+    EXEC SQL DESCRIBE stmt3 INTO :*sqlDA;
+    //Ignore warnings
+    if (SQLCODE < 0){
+        free(sqlDA);
+        return (GString(SQLCODE)+": "+sqlError());
+    }
+
+    /*************************************************
+   * After describing, set sqlda to use file reference
+   */
+    switch(sqlDA->sqlvar[idx].sqltype)
+    {
+
+    case SQL_TYP_BLOB:
+        tm("desc2File, is BLOB");
+        sqlDA->sqlvar[idx].sqltype = SQL_TYP_BLOB_FILE;
+        break;
+
+    case SQL_TYP_NBLOB:
+        tm("desc2File, is NBLOB");
+        sqlDA->sqlvar[idx].sqltype = SQL_TYP_NBLOB_FILE;
+        break;
+
+
+    case SQL_TYP_CLOB:
+    case SQL_TYP_NCLOB:
+    case SQL_TYP_XML:
+    case SQL_TYP_NXML:
+        tm("desc2File, is CLOB");
+        sqlDA->sqlvar[idx].sqltype = SQL_TYP_CLOB_FILE;
+        break;
+
+    case SQL_TYP_DBCLOB:
+    case SQL_TYP_NDBCLOB:
+        tm("desc2File, is (DB)CLOB");
+        sqlDA->sqlvar[idx].sqltype = SQL_TYP_DBCLOB_FILE;
+        break;
+
+    default:
+        tm("desc2File, is default");
+        sqlDA->sqlvar[idx].sqltype = SQL_TYP_BLOB_FILE;
+        break;
+
+    }
+
+    sqlDA->sqlvar[idx].sqldata = (char *SQL_POINTER) &outFile;
+    sqlDA->sqlvar[idx].sqllen  = SQL_LOBFILE_LEN; /* equals 267 */
+
+    /*************************************************
+   * Declare, Open and Fetch the cursor...
+   */
+
+    tm("desc2File, DECL...");
+    EXEC SQL DECLARE blobCRS2 CURSOR FOR stmt3;
+    if (SQLCODE)
+    {
+        free(sqlDA);
+        return GString(SQLCODE)+": "+sqlError();
+    }
+
+    tm("desc2File, OPEN...");
+    EXEC SQL OPEN blobCRS2;
+    if (SQLCODE)
+    {
+        free(sqlDA);
+        return GString(SQLCODE)+": "+sqlError();
+    }
+
+    tm("desc2File, FETCH...");
+    EXEC SQL FETCH blobCRS2 USING DESCRIPTOR :*sqlDA;
+    iErrCode = SQLCODE;
+    tm("desc2file, sqlcode: "+GString(SQLCODE)+": "+sqlError()+", dataLen: "+GString(outFile.data_length)+", SQLCOCDE: "+GString(SQLCODE));
+
+    if(SQLCODE) error = (GString(SQLCODE)+": "+sqlError()); /* No return here, wait for close and commit */
+
+    EXEC SQL CLOSE blobCRS2;
+
+    *outSize = outFile.data_length;
+    if( *outSize == 0 ) remove(blobFile);
+    /**************************************************
+   * Commit (to release locks) and free the locator
+   */
+    EXEC SQL COMMIT;
+    //free_da(sqlDA);
+    free (sqlDA);
+    //   if( error.length() ) return descriptorToFileOld( cmd, blobFile, outSize );
+    return error;
+}
+void dsqlobj::setStopThread(int stop)
+{
+    tm("Setting stopThread");
+    _stopThread = stop;
+}
+
+unsigned long dsqlobj::numberOfRows()
+{
+    return iNumberOfRows;
+}
+
+unsigned int dsqlobj::numberOfColumns()
+{
+    return iNumberOfColumns;
+}
+
+int dsqlobj::initRowCrs()
+{		
+    if( allRowsSeq.numberOfElements() == 0 ) return 1;
+    m_pRowAtCrs = allRowsSeq.initCrs();
+    return 0;
+}
+int dsqlobj::nextRowCrs()
+{
+    if( m_pRowAtCrs == NULL ) return 1;
+    m_pRowAtCrs = allRowsSeq.setCrsToNext();
+    return 0;
+}
+GString dsqlobj::dataAtCrs(int col)
+{
+    if( m_pRowAtCrs == NULL ) return "@CrsNotOpen";
+    if( col < 1 || (unsigned long)col > m_pRowAtCrs->elements() ) return "@OutOfReach";
+    return m_pRowAtCrs->rowElementData(col);
+}
+
+int dsqlobj::execByDescriptor( GString cmd,
+                               GSeq <GString> *dataSeq,
+                               GSeq <int> *typeSeq,
+                               GSeq <short>* sqlVarLengthSeq,
+                               GSeq <int> *forBitSeq )
+{
+    /// A statement may look like this: "UPDATE <someTable> SET COL1=?, COL2=?, COL3=? WHERE <constraint>"
+    /// dataSeq contains VAL1, VAL2, VAl3
+    /// typeSeq contains 462, 460, 452
+    /// forBitSeq contains 1, 0, 0 (the first column is set FOR BIT DATA)
+    tm("execByDescriptor, start. cmd: "+cmd);
+    strcpy(sqlCommand, cmd);
+
+    short vars = dataSeq->numberOfElements();
+    tm("Variables: "+GString(vars));
+    struct sqlda *sqlDA = (struct sqlda *) malloc (SQLDASIZE(vars));
+    strncpy((sqlDA)->sqldaid, "SQLDA   ", sizeof ((sqlDA)->sqldaid));
+    (sqlDA)->sqldabc = (long)SQLDASIZE(vars);
+    (sqlDA)->sqln = vars;
+    (sqlDA)->sqld = vars;
+
+    for( unsigned long i=1; i <= dataSeq->numberOfElements(); ++i )
+    {
+        sqlDA->sqlvar[i-1].sqltype = typeSeq->elementAtPosition(i);
+        sqlDA->sqlvar[i-1].sqllen  = sqlVarLengthSeq->elementAtPosition(i);
+        sqlDA->sqlvar[i-1].sqldata    = dataSeq->elementAtPosition(i);
+        if( forBitSeq->elementAtPosition(i) == 99 )
+        {
+            memcpy(sqlDA->sqlvar[i-1].sqldata, "\x00\x00\x00\x00\xFF\xFF\xFF\xFF",sqlDA->sqlvar[i-1].sqlname.length);
+        }
+        tm("pos4");
+    }
+
+    tm("pos5");
+    EXEC SQL
+            PREPARE stmt1 FROM :sqlCommand;
+    if (SQLCODE)
+    {
+        iErrCode = SQLCODE;
+        free_da(sqlDA);
+        return SQLCODE;
+    }
+    tm("pos6");
+    EXEC SQL
+            EXECUTE stmt1 USING DESCRIPTOR :*sqlDA;
+    if (SQLCODE)
+    {
+        iErrCode = SQLCODE;
+        tm("CODE: "+GString(SQLCODE)+", err: "+sqlError());
+        free_da(sqlDA); //Somewhat unsure
+        return SQLCODE;
+    }
+    tm("pos7");
+    EXEC SQL COMMIT;
+    free_da(sqlDA);
+    tm("Done upload");
+    return 0;
+
+}
+int dsqlobj::execByDescriptor( GString cmd, GSeq <GString> *dataSeq )
+{
+    /// A statement may look like this: "UPDATE someTable SET COL1=?, COL2=?, COL3=? WHERE someConstraint"
+    /// dataSeq contains VAL1, VAL2, VAl3
+    /// typeSeq contains 462, 460, 452
+    /// forBitSeq contains 1, 0, 0, i.e., the first column is set FOR BIT DATA
+    /// To set NULL, cmd must look like this: "UPDATE someTable SET COL1=NULL, COL2=?...."
+    /// To set CURRENT TIMESTAMP, cmd must look like this: "UPDATE someTable SET COL1=CURRENT TIMESTAMP, COL2=?...."
+
+    tm("execByDescriptor, start. cmd: "+cmd);
+    struct sqlda *pSqlda;
+    short indicator = 0;
+
+    strcpy(stmt2, cmd);
+    EXEC SQL PREPARE Stmt2 FROM :stmt2;
+
+    short markers = dataSeq->numberOfElements();
+
+    pSqlda = (struct sqlda *)malloc(SQLDASIZE(markers));
+    strncpy(pSqlda->sqldaid, "SQLDA   ", sizeof(pSqlda->sqldaid));
+    pSqlda->sqldabc = (sqlint32)SQLDASIZE(1); //?? markers?
+    pSqlda->sqln = markers;
+    pSqlda->sqld = markers;
+
+    char* data = NULL;
+    int size, *numData;
+    for( unsigned long i=1; i <= dataSeq->numberOfElements(); ++i )
+    {
+        size = sqlVarLengthSeq.elementAtPosition(i);
+        pSqlda->sqlvar[i-1].sqltype = sqlTypeSeq.elementAtPosition(i);
+        pSqlda->sqlvar[i-1].sqllen = size; //sizeof(short); //
+        if( isNumType(i) )
+        {
+            numData = new int(dataSeq->elementAtPosition(i).asInt());
+            pSqlda->sqlvar[i-1].sqldata = (char*) numData;
+        }
+        else
+        {
+            data = new char[size+1];
+            strcpy( data, (char*)dataSeq->elementAtPosition(i));
+            data[size] = 0;
+            pSqlda->sqlvar[i-1].sqldata = (char*) data;
+
+        }
+        //This does not work.
+        if( sqlForBitSeq.elementAtPosition(i) == 99 )
+        {
+            memcpy(pSqlda->sqlvar[i-1].sqldata, "\x00\x00\x00\x00\xFF\xFF\xFF\xFF",pSqlda->sqlvar[i-1].sqlname.length);
+        }
+        pSqlda->sqlvar[i-1].sqlind = (short *)&indicator;
+    }
+    EXEC SQL EXECUTE Stmt2 USING DESCRIPTOR :*pSqlda;
+    int erc = SQLCODE;
+    iErrCode = SQLCODE;
+
+    EXEC SQL COMMIT;
+    if( data ) delete [] data;
+    /* memory allocated -- free */
+    free(pSqlda);
+
+    return erc;
+}
+void dsqlobj::setReadUncommitted(short readUncommitted)
+{
+    tm("setReadUncommitted to "+GString(readUncommitted));
+    //    if( readUncommitted) this->initAll("SET CURRENT ISOLATION = UR");
+    //    else this->initAll("SET CURRENT ISOLATION = RR");
+    m_iReadUncommitted = readUncommitted;
+}
+
+
+int dsqlobj::isNumType(int pos)
+{
+    if( pos < 1 || (unsigned long)pos > sqlTypeSeq.numberOfElements() ) return 0;
+    int val = sqlTypeSeq.elementAtPosition(pos);
+    if( val >= 480 && val <= 505 ) return 1;
+    return 0;
+}
+int dsqlobj::isDateTime(int pos)
+{
+    if( pos < 1 || (unsigned long)pos > sqlTypeSeq.numberOfElements() ) return 0;
+    int val = sqlTypeSeq.elementAtPosition(pos);
+    switch (val)
+    {
+    case 384:
+    case 385:
+    case 388:
+    case 389:
+    case 392:
+    case 393:
+        return 1;
+    }
+    return 0;
+}
+
+/*********************************************
+* forBitData: 
+* 0: Old 
+* 1: Set "@DSQL@FOR_BIT_DATA" as fieldData
+* 2: give fieldData as BIN
+* 3: give fieldData as HEX
+*********************************************/
+int dsqlobj::hasForBitData()
+{
+    for( unsigned long i = 1; i <= sqlForBitSeq.numberOfElements(); ++i )
+    {
+        if( sqlForBitSeq.elementAtPosition(i) > 0 ) return sqlForBitSeq.elementAtPosition(i);
+    }
+    return 0;
+}
+/*********************************************
+* forBitData: 
+* 0: Old 
+* 1: Set "@DSQL@FOR_BIT_DATA" as fieldData
+* 2: give fieldData as BIN
+* 3: give fieldData as HEX
+*********************************************/
+int dsqlobj::isForBitCol(int i)
+{
+    if( i < 1 || (unsigned long)i > sqlForBitSeq.numberOfElements() ) return 0;
+    return sqlForBitSeq.elementAtPosition(i);
+}
+int dsqlobj::isBitCol(int i)
+{
+    PMF_UNUSED(i);
+    //No BIT columns in DB2 (yet)
+    return 0;
+}
+
+void dsqlobj::setCharForBit(int val)
+{
+    m_iCharForBit = val;
+}
+int dsqlobj::isXMLCol(int i)
+{
+    if( i < 1 || (unsigned long)i > simpleColTypeSeq.numberOfElements() ) return 0;
+    return simpleColTypeSeq.elementAtPosition(i) == CT_XML ? 1 : 0;
+}
+int dsqlobj::isLOBCol(int i)
+{
+    if( i < 1 || (unsigned long)i > simpleColTypeSeq.numberOfElements() ) return 0;
+    if( simpleColTypeSeq.elementAtPosition(i) == CT_CLOB ||
+            simpleColTypeSeq.elementAtPosition(i) == CT_BLOB ||
+            simpleColTypeSeq.elementAtPosition(i) == CT_DBCLOB
+            ) return 1;
+    return 0;
+}
+
+int dsqlobj::isNullable(int i)
+{
+    if( i < 1 || (unsigned long)i > sqlIndVarSeq.numberOfElements() ) return 1;
+    return sqlIndVarSeq.elementAtPosition(i);
+}
+
+int dsqlobj::isLongTypeCol(int i)
+{
+    if( i < 1 || (unsigned long)i > sqlLongTypeSeq.numberOfElements() ) return 0;
+    return sqlLongTypeSeq.elementAtPosition(i);
+}
+int dsqlobj::simpleColType(int i)
+{
+    if( i < 1 || (unsigned long)i > simpleColTypeSeq.numberOfElements() ) return CT_UNKNOWN;
+    return simpleColTypeSeq.elementAtPosition(i);
+}
+int dsqlobj::isFixedChar(int i)
+{
+    if( i < 1 || (unsigned long)i > sqlTypeSeq.numberOfElements() ) return 0;
+    //printf("dsqlobj::isFixedChar, col: %i, type: %i\n", i, sqlTypeSeq.elementAtPosition(i));
+    switch( sqlTypeSeq.elementAtPosition(i) )
+    {
+    case SQL_TYP_CHAR:
+    case SQL_TYP_NCHAR:
+    case SQL_TYP_GRAPHIC:
+    case SQL_TYP_NGRAPHIC:
+        return 1;
+    }
+    return 0;
+
+}
+
+int dsqlobj::getDataBases(GSeq <CON_SET*> *dbList)
+{
+
+    tm("getDatabases start");
+    GString dbName, nodeName;
+    struct sqlca sqlca;
+    short index, found, i = 0;
+    unsigned short dbHandle;
+    unsigned short dbCount;
+    struct sqledinfo *dbBuffer;
+
+    //This makes the compiler happy:
+    //writing "sqledosd ("\0", &dbHandle, &dbCount, &sqlca);" will give a warning.
+    const char* none = "\0";
+    sqledosd ((char*)none, &dbHandle, &dbCount, &sqlca);
+    if (sqlca.sqlcode )
+    {
+        tm("GetDatabases, sqlcode: "+GString(sqlca.sqlcode));
+        iErrCode = sqlca.sqlcode;
+        return (int)sqlca.sqlcode;
+    }
+
+    CON_SET * pCS;
+    for (index = 0; index < dbCount; index++)
+    {
+        found = 0;
+        sqledgne (dbHandle, &dbBuffer, &sqlca);
+        //Use alias if possible
+        dbName = GString(dbBuffer->alias).subString(1, 8).strip();
+        if( !dbName.length() ) dbName = GString(dbBuffer->dbname).subString(1, 8).strip();
+
+        nodeName = GString(dbBuffer->nodename).subString(1, 8).strip();
+        if( !nodeName.length() ) nodeName = _HOST_DEFAULT;
+
+        pCS = new CON_SET;
+        pCS->DB = dbName;
+        pCS->Host = nodeName;
+        pCS->Type = "DB2";
+        pCS->Port = _PORT_DEFAULT;
+        pCS->UID = "";
+        pCS->PWD = "";
+        pCS->DefDB = 0;
+
+        tm("getDatabases, got: "+dbName+"@"+nodeName);
+        for( i = 0; i < index; ++i )
+        {
+            if( dbList->elementAtPosition(i+1)->DB > dbName )
+            {
+                //dbNameCB->insertItem(i, dbName+nodeName);
+                dbList->insertAt(i+1, pCS);
+                found = 1;
+                break;
+            }
+        }
+        if( !found ) dbList->add(pCS); // dbNameCB->addItem(dbName+nodeName);
+    }
+    sqledcls (dbHandle, &sqlca);
+    tm("getDataBases OK");
+
+    return 0;
+
+}
+unsigned long dsqlobj::getResultCount(GString cmd)
+{
+    cmd = cmd.upperCase();
+    if( cmd.occurrencesOf("SELECT") == 0 ) return 0;
+    if( cmd.occurrencesOf("FROM") == 0 ) return 0;
+    GString tmp = cmd.subString(1, cmd.indexOf("SELECT")+6);
+    tmp += " COUNT (*) ";
+    tmp += cmd.subString(cmd.indexOf("FROM"), cmd.length()).strip();
+
+    this->initAll(tmp);
+    return this->rowElement(1,1).asLong();
+}
+
+int dsqlobj::getColSpecs(GString table, GSeq<COL_SPEC*> *specSeq)
+{    
+    GString tabSchema = this->tabSchema(table);
+    GString tabName   = this->tabName(table);
+
+    //DB2 v10: Column DEFAULT in SYSCAT.COLUMN is now CLOB (used to be VARCHAR). Sigh. We need to read the CLOB.
+    this->setCLOBReader(1); //This will read any CLOB into fieldData
+
+
+    GString cmd = "select colname, typename, length, scale, nulls, default, logged, compact, identity, generated, codepage, inline_length "
+                  " from syscat.columns "
+                  " where tabschema = '"+tabSchema+"' and tabname ='"+tabName+"'  order by colno";
+
+    tm("::getColSpecs: "+cmd);
+
+    this->initAll(cmd);
+
+    COL_SPEC *cSpec;
+
+
+    for( unsigned i=1; i<=this->numberOfRows(); ++i )
+    {
+        cSpec = new COL_SPEC;
+        cSpec->init();
+
+        cSpec->ColName = this->rowElement(i,1).strip("'");
+
+        /* colType CHARACTER (from syscat.tables) needs to be truncated to CHAR */
+        cSpec->ColType = this->rowElement(i,2).strip("'");
+        if( cSpec->ColType == "CHARACTER" ) cSpec->ColType = "CHAR";
+
+
+        /* SMALLINT, INTEGER, BIGINT, DOUBLE */
+        if( cSpec->ColType.occurrencesOf("INT") > 0 ||
+                cSpec->ColType.occurrencesOf("DOUBLE") > 0 ||
+                cSpec->ColType.occurrencesOf("DATE") > 0 ||
+                cSpec->ColType.occurrencesOf("XML") > 0 ||
+                cSpec->ColType.occurrencesOf("TIME"))
+        {
+            cSpec->Length = "N/A";
+        }
+        /* DECIMAL: (LENGTH, SCALE) */
+        else if( cSpec->ColType.occurrencesOf("DECIMAL") )
+        {
+            cSpec->Length = this->rowElement(i,3)+", "+this->rowElement(i,4);
+        }
+        else if( cSpec->ColType.occurrencesOf("XML") )
+        {
+            cSpec->Length = "0";
+        }
+        else if( cSpec->ColType.occurrencesOf("LONG VARCHAR") || cSpec->ColType.occurrencesOf("LONG CHAR") )
+        {
+            cSpec->Length = "N/A";
+        }
+
+        /* xCHAR, xLOB etc */
+        else
+        {
+            cSpec->Length = this->rowElement(i,3);
+        }
+        if( (cSpec->ColType.occurrencesOf("CHAR")) && this->rowElement(i, 11) == "0" ) //codepage is 0 for CHAR FOR BIT
+        {
+            cSpec->Misc = "FOR BIT DATA";
+        }
+
+
+        /* check for NOT NULL, DEFAULT */
+        if( this->rowElement(i,5) == "'N'" )
+        {
+            cSpec->Nullable = "NOT NULL";
+        }
+        if( !this->isNull(i, 6) )
+        {
+            //cSpec->Default = cleanString(this->rowElement(i,6));
+            cSpec->Default = this->rowElement(i,6);
+        }
+        if( this->rowElement(i,12).asInt() > 0 )
+        {
+            //cSpec->Misc = " INLINE LENGTH "+this->rowElement(i,12)+" ";
+        }
+        if( this->rowElement(i,7) == "'N'" )
+        {
+            cSpec->Misc = "NOT LOGGED";
+        }
+        if( this->rowElement(i,7) == "'Y'" )
+        {
+            cSpec->Misc += "LOGGED";
+        }
+        if( this->rowElement(i,8) == "'Y'" )
+        {
+            cSpec->Misc += " COMPACT";
+        }
+        else if( this->rowElement(i,8) == "'N'" )
+        {
+            cSpec->Misc += " NOT COMPACT";
+        }
+        /* GENERATED ALWAYS IDENTITY */
+        if( this->rowElement(i,9) == "'Y'" && this->rowElement(i,10) == "'A'")
+        {
+            int start, incr;
+            getIdentityColParams(table, &start, &incr);
+            cSpec->Misc = "GENERATED ALWAYS AS IDENTITY (START WITH "+GString(start)+", INCREMENT BY "+GString(incr)+")";
+        }
+        specSeq->add(cSpec);
+
+    }
+
+    this->setCLOBReader(0);
+    return 0;
+}
+
+int dsqlobj::getIdentityColParams(GString table, int *start, int * incr)
+{
+    dsqlobj tmp = dsqlobj(*this);
+    tmp.initAll("SELECT start, increment FROM SYSCAT.COLIDENTATTRIBUTES WHERE TABSCHEMA='"+tabSchema(table)+"' AND TABNAME='"+tabName(table)+"'");
+    *start = tmp.rowElement(1,1).asInt();
+    *incr = tmp.rowElement(1,2).asInt();
+    return 0;
+}
+
+int dsqlobj::hasUniqueConstraint(GString tableName)
+{
+    // DB2 creates a UNQ index on XML columns. If we have an XML column (i.e. XML_COL), we exclude '+XML_COL' from our search
+//    GString cmd = "SELECT COUNT(UNIQUE_COLCOUNT) FROM SYSCAT.INDEXES WHERE TABSCHEMA='"+tabSchema(tableName)+
+//            "' AND TABNAME='"+tabName(tableName)+"' AND UNIQUE_COLCOUNT > 0 AND "+
+//            "trim (LEADING '+' FROM colnames) not in (select COLNAME from SYSCAT.COLUMNS where TYPENAME ='XML' AND "
+//            "TABSCHEMA='"+tabSchema(tableName)+"' AND "
+//            "TABNAME='"+tabName(tableName)+"')";
+
+
+        GString cmd = "SELECT COUNT(UNIQUE_COLCOUNT) FROM SYSCAT.INDEXES WHERE TABSCHEMA='"+tabSchema(tableName)+
+                "' AND TABNAME='"+tabName(tableName)+"' AND UNIQUE_COLCOUNT > 0 AND "+
+                "INDEXTYPE IN ('BLOK','CLUS','DIM','REG')";
+    this->initAll(cmd);
+    return this->rowElement(1,1).asInt() > 0 ? 1 : 0;
+}
+
+int dsqlobj::getUniqueCols(GString table, GSeq<GString> *colSeq)
+{
+    tm("::getUniqueCols start");
+//    GString cmd = "SELECT colnames FROM SYSCAT.INDEXES WHERE TABSCHEMA='"+tabSchema(table)+"' AND "
+//                   "TABNAME='"+tabName(table)+"' AND (UNIQUERULE  ='P' or UNIQUERULE ='U') and "
+//                   "COLNAMES not in (select COLNAME from SYSCAT.COLUMNS where TYPENAME ='XML' AND "
+//                   "TABSCHEMA='"+tabSchema(table)+"' AND "
+//                   "TABNAME='"+tabName(table)+"') order by UNIQUERULE";
+    GString cmd = "SELECT colnames FROM SYSCAT.INDEXES WHERE TABSCHEMA='"+tabSchema(table)+"' AND "
+                   "TABNAME='"+tabName(table)+"' AND (UNIQUERULE  ='P' or UNIQUERULE ='U') and "
+                   "INDEXTYPE IN ('BLOK','CLUS','DIM','REG')";
+
+    this->initAll(cmd);
+
+    tm("::getUniqueCols rows: "+GString(this->numberOfRows()));
+    if( this->numberOfRows() == 0 ) return 1;
+    GString cols = this->rowElement(1,1).strip("'").stripLeading('+'); //First row is enough
+    tm("::getUniqueCols val for cols: "+cols);    
+    cols = cols.change('+', ',').change('-', ',').change('*', ',');
+    cols = cols.stripLeading(',');
+    *colSeq = cols.split(',');
+
+    //for(int i = 1; i <= colSeq->numberOfElements(); ++i ) printf("elmt: %i: %s<-\n", i, (char*) colSeq->elementAtPosition(i));
+    return 0;
+}
+
+int dsqlobj::getTriggers(GString table, GString *text)
+{
+    *text = "";
+    GSeq <GString> trgSeq = getTriggerSeq(table);
+    for(int i = 1; i <= trgSeq.numberOfElements(); ++i)
+    {
+        *text += "\n-- Trigger #"+GString(i)+":\n"+trgSeq.elementAtPosition(i);
+    }
+    //Todo
+//    gstuff.shred(blobText, 100);
+//    if( this->rowElement(i, 3).upperCase() != "'Y'" ) out += "-- !! Trigger below is NOT ACTIVE !! --\n";
+//    for( int k = 1; k <= gstuff.lineCount(); ++k )
+//    {
+//        out += gstuff.getLine(k);
+//    }
+    return 0;
+}
+
+
+void dsqlobj::setForKeyDetails(GString table, IDX_INFO* pIdx)
+{
+
+    if( pIdx->Type != DEF_IDX_FORKEY) return;
+
+    GString tabSchema = this->tabSchema(table);
+    GString tabName   = this->tabName(table);
+
+    GString cmd = "select reftabschema, reftabname, deleterule, updaterule, fk_colnames, pk_colnames from syscat.references "
+        " where tabschema = '"+tabSchema+"' and tabname ='"+tabName+"' and constname='"+pIdx->Name+"'";
+    this->initAll(cmd);
+    GString temp, fk, pk, fTable, reftabschema, reftabname, out;
+
+    reftabschema = this->rowElement(1, 1).strip("'").strip();
+    reftabname   = this->rowElement(1, 2).strip("'").strip();
+    fTable = reftabschema+"."+reftabname.strip("'");
+    temp = this->rowElement(1, 5).strip("'").strip().removeButOne();
+    GSeq<GString> fkColSeq = temp.split(' ');
+    for(int i = 1; i <= fkColSeq.numberOfElements(); ++i )
+    {
+        fk += "\""+fkColSeq.elementAtPosition(i)+"\", ";
+    }
+    fk = fk.strip().stripTrailing(",");
+
+    temp = this->rowElement(1, 6).strip("'").strip().removeButOne();
+    GSeq<GString> pkColSeq = temp.split(' ');
+    for(int i = 1; i <= pkColSeq.numberOfElements(); ++i )
+    {
+        pk += "\""+pkColSeq.elementAtPosition(i)+"\", ";
+    }
+    pk = pk.strip().stripTrailing(",");
+
+    out += "ALTER TABLE "+tabSchema+"."+tabName+" ADD CONSTRAINT "+pIdx->Name+" FOREIGN KEY ("+fk+") REFERENCES ";
+    GString type = this->rowElement(1, 3).strip("'").strip();
+    if( type == "C" )
+    {
+        out += " "+fTable+"("+pk+") ON DELETE CASCADE;";
+        pIdx->DeleteRule = "ON DELETE CASCADE";
+    }
+    else if( type == "A" )
+    {
+        out += " "+fTable+"("+pk+") ON DELETE NO ACTION;";
+        pIdx->DeleteRule = "ON DELETE NO ACTION";
+    }
+    else if( type == "N" )
+    {
+        out += " "+fTable+"("+pk+") ON DELETE SET NULL;";
+        pIdx->DeleteRule = "ON DELETE SET NULL";
+    }
+    else if( type == "R" )
+    {
+        out += " "+fTable+"("+pk+") ON DELETE RESTRICT;";
+        pIdx->DeleteRule = "ON DELETE RESTRICT";
+    }
+    else out += "    "+fTable+"("+pk+");";
+    pIdx->Stmt = out.removeButOne();
+    pIdx->RefCols = pk;
+    pIdx->Columns = fk;
+    pIdx->RefTab = fTable;
+}
+
+
+GSeq <GString> dsqlobj::getTriggerSeq(GString table)
+{
+    tm("getTriggerSeq start");
+    GString tabSchema = this->tabSchema(table);
+    GString tabName   = this->tabName(table);
+    //DB2 v10: Column DEFAULT in SYSCAT.COLUMN is now CLOB (used to be VARCHAR). Sigh. We need to read the CLOB.
+    this->setCLOBReader(1); //This will read any CLOB into fieldData
+
+    int erc;
+    GString cmd = "select trigschema, trigname, valid from syscat.triggers "
+        " where tabschema = '"+tabSchema+"' and tabname ='"+tabName+"'";
+    this->initAll(cmd);
+
+    GString blobText, out, temp;
+    tm("getTriggerSeq, triggers: "+GString(this->numberOfRows()));
+    GSeq <GString> triggerSeq;
+    for( int i = 1; i <= (int)this->numberOfRows(); ++i )
+    {
+        out = "";
+        temp = "Select text from syscat.triggers where trigschema="+this->rowElement(i,1);
+        temp += " and trigname = "+this->rowElement(i,2);
+
+        erc = this->retrieveBlob( temp, blobText, 0 );                
+        if( erc )
+        {
+            out += temp+"\n";
+            out += "-- !! ERROR "+GString(erc)+" retrieving trigger '"+this->rowElement(i,1)+"."+this->rowElement(i,2)+"'\n";
+            continue;
+        }
+        blobText = blobText.change("\t", " ").strip();
+        if( this->rowElement(i, 3).upperCase() != "'Y'" ) out += "-- !! This trigger is NOT ACTIVE !! -- ";
+//        while ( blobText.occurrencesOf("\n") > 0 )
+//        {
+//            blobText = blobText.replaceAt(blobText.indexOf((char*)"\n"), (char*)" "); //  .remove(blobText.indexOf("\n"), 1);
+//        }
+        printf("blobText: %s\n", (char*) (out+blobText+";"));
+        triggerSeq.add(out+blobText+";");
+    }
+    return triggerSeq;
+}
+
+GSeq <IDX_INFO*> dsqlobj::getIndexeInfo(GString table)
+{
+    GString tabSchema = this->tabSchema(table);
+    GString tabName   = this->tabName(table);
+    GString indSchema, indName;
+
+    GString colNames, out = "";
+
+    GString cmd = "SELECT IID, INDSCHEMA as Schema, INDNAME As Name, COLNAMES "
+                  "as Columns, UNIQUERULE as TYPE,"
+                  "t.TBSPACE as TABSPACE , i.CREATE_TIME, i.Definer, STATS_TIME, 'N/A' as Delete_Rule "
+                  "FROM SYSCAT.INDEXES i, SYSCAT.TABLESPACES t WHERE "
+                  "TABSCHEMA='"+tabSchema+"' AND "
+                  "TABNAME='"+tabName+"' and t.TBSPACEID=i.TBSPACEID order by IID";
+    this->initAll(cmd);
+
+
+    GSeq <IDX_INFO*> indexSeq;
+    IDX_INFO * pIdxInfo;
+    for(unsigned long  i=1; i<=this->numberOfRows(); ++i )
+    {
+        pIdxInfo = new IDX_INFO;
+        pIdxInfo->init();
+
+        if( this->rowElement(i,5).strip("'").upperCase() == "P" ) pIdxInfo->Type = DEF_IDX_PRIM;
+        else if( this->rowElement(i,5).strip("'").upperCase() == "U" ) pIdxInfo->Type = DEF_IDX_UNQ;
+        else pIdxInfo->Type = DEF_IDX_DUPL;
+
+        indSchema = this->rowElement(i,2).strip("'").strip();
+        indName = this->rowElement(i,3).strip("'");
+        //colNames = this->rowElement(i,4).strip("'");
+        colNames = setIndexColUse(indSchema, indName, pIdxInfo);
+
+
+        pIdxInfo->Iidx        = this->rowElement(i,1).strip("'").strip();
+        pIdxInfo->Schema      = indSchema;
+        pIdxInfo->Name        = indName;        
+        pIdxInfo->Columns     = colNames;
+        pIdxInfo->TabSpace    = this->rowElement(i,6).strip("'");
+        pIdxInfo->CreateTime  = this->rowElement(i,7).strip("'");
+        pIdxInfo->Definer     = this->rowElement(i,8).strip("'");
+        pIdxInfo->StatsTime   = this->rowElement(i,9).strip("'");
+        pIdxInfo->DeleteRule   = this->rowElement(i,10).strip("'");
+        out = "";
+        if( pIdxInfo->Type == DEF_IDX_PRIM )
+        {
+            pIdxInfo->Stmt = "ALTER TABLE "+table+" ADD CONSTRAINT "+indName+" PRIMARY KEY ("+colNames+");";
+        }
+        else
+        {
+            out = "CREATE ";
+            if( pIdxInfo->Type == DEF_IDX_UNQ ) out += "UNIQUE ";
+            out += "INDEX "+indSchema+"."+indName+" ON ";
+            out += table+" ("+colNames + ");";
+            pIdxInfo->Stmt = out;
+        }
+        indexSeq.add(pIdxInfo);
+    }
+
+
+    //GString yep = "trim(FK_COLNAMES )  concat ' => ' concat trim(REFTABSCHEMA) concat '.' concat trim(REFTABNAME) concat  ' [' concat trim(PK_COLNAMES) concat  ']'";
+    GString yep = "trim(FK_COLNAMES )"; //  concat ' => ' concat trim(REFTABSCHEMA) concat '.' concat trim(REFTABNAME) concat  ' [' concat trim(PK_COLNAMES) concat  ']'";
+    cmd = "select 'N/A', tabschema, constname, "+yep+", 'Foreign Key', 'N/A', create_time, definer, 'N/A', case DELETERULE when 'C' then 'DELETE CASCADE' else '' end from syscat.references "
+                                                      " where tabschema = '"+tabSchema+"' and tabname ='"+tabName+"'";
+    GString err = this->initAll(cmd);
+    if( err.length() )
+    {
+        //yep = "FK_COLNAMES concat ' => ' concat REFTABSCHEMA concat '.' concat REFTABNAME concat  ' [' concat PK_COLNAMES concat  ']'";
+        yep = "FK_COLNAMES"; // concat ' => ' concat REFTABSCHEMA concat '.' concat REFTABNAME concat  ' [' concat PK_COLNAMES concat  ']'";
+    }
+    cmd = "select 'N/A', tabschema, constname, "+yep+", 'Foreign Key', 'N/A', create_time, definer, 'N/A', case DELETERULE when 'C' then 'DELETE CASCADE' else '' end from syscat.references "
+                                                     " where tabschema = '"+tabSchema+"' and tabname ='"+tabName+"'";
+    this->initAll(cmd);
+
+    //printf("CMD: %s\n", (char*) cmd);
+
+    for( int i = 1; i <= (int)this->numberOfRows(); ++i )
+    {
+        pIdxInfo = new IDX_INFO;
+        pIdxInfo->init();
+
+        indSchema = this->rowElement(i,2).strip("'").strip();
+        indName = this->rowElement(i,3).strip("'");
+
+
+        pIdxInfo->Type        = DEF_IDX_FORKEY;
+        colNames = this->rowElement(i,4).strip("'");
+        colNames = setIndexColUse(indSchema, indName, pIdxInfo);
+
+
+        pIdxInfo->Iidx        = this->rowElement(i,1).strip("'").strip();
+        pIdxInfo->Schema      = indSchema;
+        pIdxInfo->Name        = indName;
+        pIdxInfo->Columns     = this->rowElement(i,4).strip("'").removeButOne().change(" ", ", ");
+
+        pIdxInfo->TabSpace    = "N/A";
+        pIdxInfo->CreateTime  = this->rowElement(i,"CREATE_TIME").strip("'");
+        pIdxInfo->Definer     = this->rowElement(i,"DEFINER").strip("'");
+        pIdxInfo->StatsTime   = "N/A";
+        pIdxInfo->DeleteRule   = this->rowElement(i,10).strip("'");
+        indexSeq.add(pIdxInfo);
+    }
+    //Get foreign key statements: This re-initializes (*this)
+    for( int i = 1; i <= indexSeq.numberOfElements(); ++i )
+    {
+        pIdxInfo = indexSeq.elementAtPosition(i);
+        setForKeyDetails(table, pIdxInfo);
+    }
+    return indexSeq;
+}
+
+int dsqlobj::minColSeparator(GString col)
+{
+    for(int i = 1; i <= col.length(); ++i)
+    {
+        if( col[i] == '+') return i;
+        if( col[i] == '-') return i;
+        if( col[i] == '*') return i;
+    }
+    return 0;
+}
+
+GString dsqlobj::getChecks(GString table, GString filter)
+{
+    GSeq <GString> checksSeq = getChecksSeq(table, filter);
+    GString text;
+    for(int i = 1; i <= checksSeq.numberOfElements(); ++i)
+    {
+        text += checksSeq.elementAtPosition(i)+"\n";
+    }
+    return text;
+}
+
+GSeq <GString> dsqlobj::getChecksSeq(GString table, GString filter)
+{
+    tm("getChecksSeq start");
+    GString tabSchema = this->tabSchema(table);
+    GString tabName   = this->tabName(table);
+    this->setCLOBReader(1); //This will read any CLOB into fieldData
+    int erc;
+
+
+    GString cmd = "select constname from syscat.checks "
+        " where tabschema = '"+tabSchema+"' and tabname ='"+tabName+"'";
+    if( filter.length() ) cmd += " AND ConstName = '"+filter+"'";
+    this->initAll(cmd);
+
+    GString blobText, out, temp;
+    tm("getChecksSeq, Checks: "+GString(this->numberOfRows()));
+    GSeq <GString> checksSeq;
+    for( unsigned long i = 1; i <= (int)this->numberOfRows(); ++i )
+    {
+        out = "";
+        temp = "Select text from syscat.checks where constname="+this->rowElement(i,1);
+        temp += " and tabschema = '"+tabSchema+"' and tabname ='"+tabName+"'";
+
+        erc = this->retrieveBlob( temp, blobText, 0 );
+        if( erc )
+        {
+            out += temp+"\n";
+            out += "-- !! ERROR "+GString(erc)+" retrieving check '"+this->rowElement(i,1)+"'\n";
+            continue;
+        }
+        else
+        {
+            blobText = blobText.change("\t", " ").removeButOne().strip();
+            out = "ALTER TABLE "+table+" ADD CONSTRAINT "+this->rowElement(i,1)+" CHECK ("+blobText+");";
+        }
+
+        checksSeq.add(out);
+    }
+
+//    GString indName, colNames;
+//    cmd = "SELECT trim(INDSCHEMA), INDNAME, COLNAMES, UNIQUERULE, t.TBSPACE FROM "
+//          "SYSCAT.INDEXES i, SYSCAT.TABLESPACES t WHERE TABSCHEMA='"+tabSchema+"' "
+//          "AND TABNAME='"+tabName+"' AND UNIQUERULE = 'U' and t.TBSPACEID=i.TBSPACEID";
+//    if( filter.length() ) cmd += " AND IndName='"+filter+"'";
+//    this->initAll(cmd);
+
+//    for(unsigned long  i=1; i<=this->numberOfRows(); ++i )
+//    {
+//        out = "";
+//        indName = this->rowElement(i,2).strip("'");
+//        colNames = this->rowElement(i,3).strip("'").change("*",",").change("-",",").change("+",",").strip(",");
+//        out += "ALTER TABLE "+table+" ADD CONSTRAINT "+indName+" UNIQUE ";
+//        out += "("+colNames+");";
+//        checksSeq.add(out);
+//    }
+    return checksSeq;
+}
+
+
+GString dsqlobj::setIndexColUse(GString indSchema, GString indName, IDX_INFO* pIdx)
+{
+    indName = indName.strip("'").strip();
+    indSchema = indSchema.strip("'").strip();
+
+    tm("setIndexColUse, indSchema: "+indSchema+", indName: "+indName);
+    GString colName, out, cmd, orderType;
+
+    cmd = "select colname, case colorder when 'A' then 'ASC' when 'D' then 'DESC' when 'A' then 'RAND' else '' end as OrderNr, text ";
+    cmd += "from SYSCAT.INDEXCOLUSE where indSchema='"+indSchema+"' and indname='"+indName+"' order by colseq";
+    dsqlobj tmpDSQL = dsqlobj(*this);
+    tmpDSQL.setCLOBReader(1);
+    tmpDSQL.initAll(cmd);
+    for( int i = 1; i <= tmpDSQL.numberOfRows(); ++i )
+    {
+        if( pIdx->Type != DEF_IDX_PRIM ) orderType = " " + tmpDSQL.rowElement(i,2).strip("'");
+        colName = tmpDSQL.rowElement(i,3) == "NULL" ? tmpDSQL.rowElement(i,1) : tmpDSQL.rowElement(i,3);
+        out += "\""+colName.strip("'")+"\"" + orderType +", ";
+    }
+    out = out.stripTrailing(", ");
+    tmpDSQL.setCLOBReader(0);
+    return out;
+}
+
+void dsqlobj::createXMLCastString(GString &xmlData)
+{
+    tm("::createXMLCastString called, in: "+xmlData);
+    xmlData = " XMLPARSE (DOCUMENT('"+(xmlData)+"')) ";
+    tm("::createXMLCastString called, out: "+xmlData);
+}
+
+int dsqlobj::isBinary(unsigned long row, int col)
+{
+    if( row < 1 || row > allRowsSeq.numberOfElements() ) return 0;
+    GRowHdl *aRow;
+    aRow = allRowsSeq.elementAtPosition(row);
+    if( col < 1 || (unsigned long) col > aRow->elements() ) return 0;
+    tm("::isBinary: "+GString(aRow->rowElement(col)->isBinary)+", row: "+GString(row)+", col: "+GString(col));
+    return aRow->rowElement(col)->isBinary;
+}
+
+int  dsqlobj::isNull(unsigned long row, int col)
+{
+    if( row < 1 || row > allRowsSeq.numberOfElements() ) return 0;
+    GRowHdl *aRow;
+    aRow = allRowsSeq.elementAtPosition(row);
+    if( col < 1 || (unsigned long) col > aRow->elements() ) return 0;
+    tm("::isNull: "+GString(aRow->rowElement(col)->isNull)+", row: "+GString(row)+", col: "+GString(col));
+    return aRow->rowElement(col)->isNull;
+}
+
+int dsqlobj::isTruncated(unsigned long row, int col)
+{
+    if( row < 1 || row > allRowsSeq.numberOfElements() ) return 0;
+    GRowHdl *aRow;
+    aRow = allRowsSeq.elementAtPosition(row);
+    if( col < 1 || (unsigned long) col > aRow->elements() ) return 0;
+    tm("::isTruncated: row: "+GString(row)+", col: "+GString(col)+", trunc: "+GString(aRow->rowElement(col)->isTruncated));
+    return aRow->rowElement(col)->isTruncated;
+}
+
+GString dsqlobj::cleanString(GString in)
+{	
+    if( in.length() < 2 ) return in;
+    if( in[1UL] == '\'' && in[in.length()] == '\'' ) return in.subString(2, in.length()-2);
+    return in;
+}
+void dsqlobj::clearAllSequences()
+{
+    hostVarSeq.removeAll();
+    sqlTypeSeq.removeAll();
+    sqlVarLengthSeq.removeAll();
+    sqlLenSeq.removeAll();
+    sqlIndVarSeq.removeAll();
+    sqlForBitSeq.removeAll();
+    sqlLongTypeSeq.removeAll();
+    simpleColTypeSeq.removeAll();
+    iNumberOfRows   = 0;
+    iNumberOfColumns = 0;
+
+    GRowHdl * aLine;
+    while( !allRowsSeq.isEmpty() )
+    {
+        aLine = allRowsSeq.firstElement();
+        delete aLine;
+        allRowsSeq.removeFirst();
+    }
+}
+void dsqlobj::setTruncationLimit(int limit)
+{
+    //Setting m_iTruncationLimit to 0 -> no truncation
+    m_iTruncationLimit = limit;
+}
+void dsqlobj::getResultAsHEX(int asHex)
+{
+    m_iGetResultAsHEX = asHex;
+}
+void dsqlobj::setGDebug(GDebug *pGDB)
+{
+    m_pGDB = pGDB;
+}
+int dsqlobj::exportAsTxt(int mode, GString sqlCmd, GString table, GString outFile, GSeq <GString>* startText, GSeq <GString>* endText, GString *err)
+{
+    PMF_UNUSED(mode);
+    PMF_UNUSED(sqlCmd);
+    PMF_UNUSED(table);
+    PMF_UNUSED(outFile);
+    PMF_UNUSED(startText);
+    PMF_UNUSED(endText);
+
+    *err = "<Not implemented yet>";
+    return 1;
+}
+
+GString dsqlobj::tabSchema(GString table)
+{
+    if( table.occurrencesOf(".") == 1 ) return table.subString(1, table.indexOf('.')-1).strip("\"");
+    return "";
+}
+GString dsqlobj::tabName(GString table)
+{
+    if( table.occurrencesOf(".") == 1 ) return table.subString(table.indexOf('.')+1, table.length()).strip().strip("\"");
+    return "";
+}
+
+dsqlobj::RowData::~RowData()
+{
+    rowDataSeq.removeAll();
+}
+void dsqlobj::RowData::add(GString data)
+{
+    rowDataSeq.add(data);
+}
+GString dsqlobj::RowData::elementAtPosition(int pos)
+{
+    if( pos < 1 || pos > (int)rowDataSeq.numberOfElements() ) return "";
+    return rowDataSeq.elementAtPosition(pos);
+}
+int dsqlobj::getHeaderData(int pos, GString * data)
+{
+    if( pos < 1 || pos > (int)headerSeq.numberOfElements()) return 1;
+    *data = headerSeq.elementAtPosition(pos);
+    return 0;
+}
+
+int dsqlobj::getRowData(int row, int col, GString * data)
+{
+    if( row < 1 || row > (int)rowSeq.numberOfElements() ) return 1;
+    if( col < 1 || col > (int)rowSeq.elementAtPosition(row)->numberOfElements() ) return 1;
+    *data = rowSeq.elementAtPosition(row)->elementAtPosition(col);
+    return 0;
+}
+
+unsigned long dsqlobj::RowData::numberOfElements()
+{
+    return rowDataSeq.numberOfElements();
+}
+unsigned long dsqlobj::getHeaderDataCount()
+{
+    return headerSeq.numberOfElements();
+}
+unsigned long dsqlobj::getRowDataCount()
+{
+    return rowSeq.numberOfElements();
+}
+int dsqlobj::isTransaction()
+{
+    tm("isTransaction...");
+    tm("isTransaction: "+GString(iCommandOK));
+    return iCommandOK;
+}
+
+void dsqlobj::clearCommSequences()
+{
+    RowData *pRowData;
+    while( !rowSeq.isEmpty() )
+    {
+        pRowData = rowSeq.firstElement();
+        delete pRowData;
+        rowSeq.removeFirst();
+    }
+    headerSeq.removeAll();
+}
+
+GString dsqlobj::getDdlForView(GString tableName)
+{
+    GString cmd = "SELECT TEXT FROM SYSCAT.VIEWS WHERE VIEWSCHEMA='"+this->tabSchema(tableName)+"' AND ";
+    cmd += "VIEWNAME='"+this->tabName(tableName)+"'";
+
+    GString viewTxt;
+    if( this->retrieveBlob( cmd, viewTxt, 0 ) ) return "";
+    return viewTxt;
+}
+
+void dsqlobj::setDatabaseContext(GString context)
+{
+    PMF_UNUSED(context);
+}
+
+void dsqlobj::currentConnectionValues(CON_SET * conSet)
+{
+    conSet->DB = m_strDB;
+    conSet->Host = m_strHost;
+    conSet->PWD = m_strPWD;
+    conSet->UID = m_strUID;
+    conSet->Port = m_iPort;
+}
+
+GString dsqlobj::lastSqlSelectCommand()
+{
+    return m_strLastSqlSelectCommand;
+}
+
+TABLE_PROPS dsqlobj::getTableProps(GString tableName)
+{
+    this->initAll("SELECT TYPE, BASE_TABSCHEMA, BASE_TABNAME FROM SYSCAT.TABLES WHERE TABSCHEMA='"+ tabSchema(tableName)+"' AND TABNAME='"+tabName(tableName)+"'");
+    TABLE_PROPS tableProps;
+    tableProps.init();
+    if( rowElement(1,1).strip("'") == "A" ) tableProps.TableType = TYPE_ALIAS;
+    else if( rowElement(1,1).strip("'") == "G" ) tableProps.TableType =  TYPE_CRT_TEMP_TABLE;
+    else if( rowElement(1,1).strip("'") == "H" ) tableProps.TableType =  TYPE_HIR_TABLE;
+    else if( rowElement(1,1).strip("'") == "L" ) tableProps.TableType =  TYPE_DET_TABLE;
+    else if( rowElement(1,1).strip("'") == "N" ) tableProps.TableType =  TYPE_NICK;
+    else if( rowElement(1,1).strip("'") == "S" ) tableProps.TableType =  TYPE_MAT_QUERY;
+    else if( rowElement(1,1).strip("'") == "T" ) tableProps.TableType =  TYPE_UNTYPED_TABLE;
+    else if( rowElement(1,1).strip("'") == "U" ) tableProps.TableType =  TYPE_TYPED_TABLE;
+    else if( rowElement(1,1).strip("'") == "V" ) tableProps.TableType =  TYPE_UNTYPED_VIEW;
+    else if( rowElement(1,1).strip("'") == "W" ) tableProps.TableType =  TYPE_TYPED_VIEW;
+
+    if( tableProps.TableType == TYPE_ALIAS )
+    {
+        tableProps.BaseTabSchema = rowElement(1,2).strip("'").strip();
+        tableProps.BaseTabName   = rowElement(1,3).strip("'").strip();
+    }
+    return tableProps;
+}
+
+int dsqlobj::tableIsEmpty(GString tableName)
+{
+    GString err = this->initAll("SELECT * FROM "+tableName+" FETCH FIRST 1 ROWS ONLY");
+    if( this->numberOfRows() == 0 || err.length() ) return 1;
+    return 0;
+}
+
+int dsqlobj::deleteViaFetch(GString tableName, GSeq<GString> * colSeq, int rowCount, GString whereClause)
+{
+    GString cmd, err;
+    if( colSeq->numberOfElements() == 0 )
+    {
+        GString filter = "SELECT * FROM "+tableName;
+        if( whereClause.length() ) filter += " WHERE "+whereClause;
+        cmd = "DELETE FROM "+tableName;
+
+        err = this->deleteByCursor(filter, cmd, rowCount, 0);
+        this->commit();
+        if( err.length() ) return sqlCode();
+        return 0;
+    }
+    cmd = "DELETE FROM "+tableName+" WHERE (";
+    for( int i = 1; i <= (int) colSeq->numberOfElements(); ++i )
+    {
+        cmd += colSeq->elementAtPosition(i) +",";
+    }
+    cmd.stripTrailing(",");
+    cmd += ") IN ( SELECT ";
+    for( int i = 1; i <= (int) colSeq->numberOfElements(); ++i )
+    {
+        cmd += colSeq->elementAtPosition(i) +",";
+    }
+    cmd.stripTrailing(",");
+    cmd += " FROM "+tableName+" ORDER BY "+colSeq->elementAtPosition(1)+" FETCH FIRST "+GString(rowCount)+" ROWS ONLY)";
+    if( whereClause.length() ) cmd += " AND "+whereClause;
+
+    err = this->initAll(cmd);
+    tm("deleteViaFetch: cmd: "+cmd+"\nErr: "+err);    
+    if( err.length() ) return sqlCode();
+    this->commit();
+    return 0;
+}
+
+
+/***************************************************************
+ *
+ * TESTING
+ *
+***************************************************************/
+
+/*
+GString dsqlobj::initAll_CLI(GString message, unsigned long maxRows, int getLen)
+{
+    SQLRETURN ret = 0;
+    deb("initAll: start. Msg: "+message);
+    if( !iConnected )
+    {
+        sqlErrTxt = "@db2dcli: Not Connected.";
+        return sqlErrTxt;
+    }
+    m_ulMaxRows = maxRows;
+    m_iNumberOfColumns = m_iNumberOfRows = 0L;
+    long erc;
+    SQLRETURN       rc;
+
+    clearSequences();
+
+    rc = prepareSTMT(message);
+
+    if( rc )
+    {
+       deb("initAll, calling sqlError()");
+       readErrorState();
+       clearSequences();
+       if( rc > 0 ) erc = rc;
+       else erc = sqlCode();
+       rc = SQLFreeStmt(m_SQLHSTMT, SQL_DROP);
+       deb("initAll, Stmt freed due to error. rc: "+GString(erc));
+       if( m_iLastSqlCode == 100) return "SQLCode 100: No row(s) found.";
+       return m_strLastError;
+
+    }
+
+    deb("initAll: Starting while....");
+    m_iNumberOfRows = 0;
+    char *buf;
+    GString data;
+    long maxLen;
+    GRowHdl * pRow;
+
+    int getFullXML = 0;
+
+    rc = getColInfo(&m_SQLHSTMT);
+    if( rc )
+    {
+       deb("initAll, calling sqlError()");
+       readErrorState();
+       clearSequences();
+       if( rc > 0 ) erc = rc;
+       else erc = sqlCode();
+       rc = SQLFreeStmt(m_SQLHSTMT, SQL_DROP);
+       deb("initAll, Stmt freed due to error. rc: "+GString(erc));
+       if( m_iLastSqlCode == 100) return "SQLCode 100: No row(s) found.";
+       return m_strLastError;
+
+    }
+
+    if( getLen )
+    {
+        for(int i = 1; i <= m_iNumberOfColumns; ++i ) sqlLenSeq.add(hostVariable(i).length()+1);
+    }
+
+    deb("initAll: Starting while....");
+    while ( SQLFetch(m_SQLHSTMT) == SQL_SUCCESS)
+    {
+        SQLINTEGER len = 0;
+        if( maxRows > 0 && m_iNumberOfRows >= maxRows ) break;
+        pRow = new GRowHdl;
+        int bufLen;
+        short isNull;
+
+        for ( int i = 1; i <= m_iNumberOfColumns; i++ )
+        {
+
+            if( handleLobsAndXmls(i, &data, getFullXML, &isNull) )
+            {
+                deb("::readRowData, col "+GString(i)+" is LOB/XML, data: "+data);
+                pRow->addElement(data, isNull);
+            }
+            else
+            {
+                deb("::readRowData, col: "+GString(i)+" no LOB/XML data. sqlVarLengthSeq has "+GString(sqlVarLengthSeq.numberOfElements())+" elements");
+                bufLen = sqlVarLengthSeq.elementAtPosition(i)+1;
+
+
+                //Double bufLen for CHAR FOR BIT DATA
+                if( sqlForBitSeq.elementAtPosition(i)) bufLen = bufLen*2 - 1;
+                if( sqlTypeSeq.elementAtPosition(i) == SQL_DECIMAL ) bufLen++;
+                if( sqlTypeSeq.elementAtPosition(i) == SQL_DOUBLE ) bufLen += 6;
+
+                buf = new char[bufLen];
+                if( sqlTypeSeq.elementAtPosition(i) == SQL_LONGVARBINARY ) ret = SQLGetData(m_SQLHSTMT, i, SQL_C_BINARY, buf, bufLen, &len);
+                else ret = SQLGetData(m_SQLHSTMT, i, SQL_C_CHAR, buf, bufLen, &len);
+                deb("::readRowData, charForBit: "+GString(sqlForBitSeq.elementAtPosition(i))+", bufLen: "+GString(bufLen)+", len: "+GString(len));
+                if( len > bufLen )
+                {
+                    //Todo: Either realloc or get correct size
+                    bufLen = len+1;
+                    delete [] buf;
+                    buf = new char[bufLen];
+                    if( sqlTypeSeq.elementAtPosition(i) == SQL_LONGVARBINARY ) ret = SQLGetData(m_SQLHSTMT, i, SQL_C_BINARY, buf, bufLen, &len);
+                    else ret = SQLGetData(m_SQLHSTMT, i, SQL_C_CHAR, buf, bufLen, &len);
+                    deb("::initAll, rc getData(2): "+GString(ret)+", buf: "+GString(buf)+", len in: "+GString(bufLen)+", lenRet: "+GString(len));
+                }
+
+                deb("::initAll, row: "+GString(m_iNumberOfRows)+", col: "+GString(i)+", ret: "+GString(ret)+", len: "+GString(len)+", bufLen: "+GString(bufLen)+", type: "+GString(sqlTypeSeq.elementAtPosition(i)));
+                if (len == SQL_NULL_DATA)  pRow->addElement("NULL");
+                else
+                {
+                    if( m_iGetResultAsHEX ) data = GString(buf, len, GString::HEX); //.stripTrailing('0') ;
+                    else data = GString(buf, len) ;
+                    deb("DATA: "+data);
+
+                    if( bufLen > m_iTruncationLimit && m_iTruncationLimit > 0 && sqlForBitSeq.elementAtPosition(i) < 3) data = data.subString(1, m_iTruncationLimit);
+                    if( !isNumType(i))pRow->addElement("'"+data+"'");
+                    else pRow->addElement(data.translate(',', '.'));
+                }
+                delete[] buf;
+            }
+            if( getLen )
+            {
+                maxLen = max((signed) data.strip("'").strip().length()+1, sqlLenSeq.elementAtPosition(i));
+                deb("initAll: Col "+GString(i)+", setting max: "+GString(maxLen));
+                sqlLenSeq.replaceAt(i, maxLen);
+            }
+        }
+        allRowsSeq.add( pRow );
+        m_iNumberOfRows++;
+    }
+    if(ret) readErrorState();
+    SQLCloseCursor(m_SQLHSTMT);
+    m_strLastSqlSelectCommand = message;
+    deb("::initAll, err fetch: "+GString(ret));
+
+    SQLFreeStmt(m_SQLHSTMT, SQL_CLOSE);
+    if( m_SQLHSTMT) SQLFreeHandle(SQL_HANDLE_STMT, m_SQLHSTMT);
+    //readErrorState();
+    if( ret && ret != 100) return m_strLastError;
+    return "";
+}
+
+
+int dsqlobj::prepareSTMT(unsigned char* sqlstr)
+{
+    deb("analysing statement: "+GString(sqlstr));
+
+
+    SQLINTEGER      rowcount;
+    SQLRETURN       rc;
+
+    rc = SQLAllocStmt(m_SQLHDBC, &m_SQLHSTMT);
+    deb("rc AllocStmt: "+GString(rc));
+    if( rc ) return 1;
+
+    deb("Preparing...");
+    rc = SQLPrepare(m_SQLHSTMT, sqlstr, SQL_NTS);
+
+    deb("RUNIT: PREP");
+    deb("rc Prepare: "+GString(rc));
+    if( rc ) return 1;
+
+
+    rc = SQLExecute(m_SQLHSTMT);
+    deb("rc Executing: "+GString(rc));
+    if (rc != SQL_SUCCESS)
+    {
+        m_iLastSqlCode = rc;
+        return rc;
+    }
+
+    rc = SQLNumResultCols(m_SQLHSTMT, &m_iNumberOfColumns);
+    if( rc ) return rc;
+    deb("Cols: "+GString(m_iNumberOfColumns)+" (0 if not select)");
+    if (m_iNumberOfColumns == 0)
+    {
+        m_iIsTransaction = 1;
+        rc = SQLRowCount(m_SQLHSTMT, &rowcount);
+        deb("RowCount: "+GString(rowcount));
+
+        if (rowcount > 0)
+        {
+            deb("Rows affected: "+GString(rowcount));
+        }
+        return 0;
+    }
+
+    deb("analysing...Done.");
+    return (0);
+}
+
+*/
+
+/**************************************************************
+* Testfunction for LOB upload.
+*************************************************************/
+void dsqlobj::testme()
+{
+    /* To compile, put these declarations in the SQL DECLARE section:
+    SQL TYPE IS BLOB_FILE blobFilePhoto;
+    char photoFormat[10];
+    char empno[7];
+    short lobind;
+
+
+    char fileName[15];
+
+    strcpy(photoFormat, "gif");
+    strcpy(fileName, "photo.GIF");
+
+    strcpy(blobFilePhoto.name, fileName);
+    blobFilePhoto.name_length = strlen(blobFilePhoto.name);
+
+
+
+    blobFilePhoto.file_options = SQL_FILE_OVERWRITE;
+    EXEC SQL SELECT picture INTO :blobFilePhoto :lobind
+      FROM emp_photo
+      WHERE photo_format = :photoFormat AND empno = '000130';
+
+    if (lobind < 0)
+    {
+      printf("  NULL LOB indicated.\n");
+      return ;
+    }
+    blobFilePhoto.file_options = SQL_FILE_READ;
+    EXEC SQL INSERT INTO emp_photo(empno, photo_format, picture)
+            VALUES('200340', :photoFormat, :blobFilePhoto);
+
+    EXEC SQL COMMIT;
+*/
+}
+

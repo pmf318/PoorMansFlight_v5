@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html><head>
+  
+  <meta content="text/html; charset=windows-1252" http-equiv="content-type">
+  <title>pmfHelp_con</title>
+
+  
+  
+  <style type="text/css">
+#pmfHelp_con {  
+  border-top-width: 30px;  
+  border-right-width: 30px;  
+  border-bottom-width: 30px;  
+  border-left-width: 30px;
+}
+
+  </style>
+</head><body>
+<span style="font-weight: bold;">Plugins</span><br>
+
+<br>
+
+PMF uses plugins to access databases. Currently these plugins are
+available:<br>
+
+<ul>
+
+  <li>DB2: Use this to access DB2 via the native DB2-client&nbsp;</li>
+  <li>DB2(ODBC): Use this if you prefer to connect via ODBC</li>
+  <li>SqlServer: Use this to connect to SqlServer (via ODBC)</li>
+  <li>MariaDB: Use this to connect to MariaDB or MySQL</li>
+</ul>
+
+If you build PMF yourself, you can chose which plugins to build.<br>
+
+<br>
+
+A plugin can have three states:<br>
+
+<ul>
+
+  <li>OK: The plugin is loadable and ready for use.<br></li>
+  <li>Missing: The plugins should be located in the folder "plugins" in
+the
+directory where you installed PMF.&nbsp; If they are missing, reinstall
+PMF. If they are not missing, the configuration is wrong. On Linux,
+locate the file "pmf5.conf" in your "./config" directory and edit
+"pluginPath". On Windows, search the registry (with regedt32) and
+locate the key "pluginPath". Change or delete this key.<br>
+  </li>
+  <li>Not loadable: Some database-specific DLLs or libraries are not
+installed on your system. Check those: 
+	<ul>
+	<li>DB2 on Linux: "libdb2.so.(x)"</li>
+	<li>DB2 on Windows: "DB2APP.DLL"</li>
+	<li>SqlServer on Linux: "libodbc.so"</li>
+	<li>SqlServer on Windows: "ODBC232.DLL"</li>
+	<li>MariaDB on Linux: "libmariadbclient.so.(x)"</li>	
+	<li>MariaDB on Windows: "libmariadb.dll"</li>
+</ul>		
+and all their respective dependencies. Usually it should be enough to
+install the database's client software and/or ODBC subsystem. For
+detailed information on how to set up your database, go to
+www.leipelt.de </li>
+</ul>
+
+<br>
+
+<p style="text-align: left;"><span style="font-weight: bold;">Connecting
+to DB2 on Windows and Linux</span></p>
+
+<p style="text-align: left; font-style: italic;">For detailed
+information on how to set up your database, go to www.leipelt.de&nbsp;</p>
+
+<p style="text-align: left;">This is rather simple on both Linux and
+Windows and there are good manuals available online. Simply search for
+"DB2 client installation" in your favourite search engine.<br>
+You basically need to </p>
+
+<ul>
+
+  <li>start "db2setup" (either from the servers installation disk or as
+download)</li>
+  <li>install the client (also called Client Application Enabler [CAE]
+or simply DB2 Connect)</li>
+  <li>catalog your database(s)</li>
+</ul>
+
+As soon as the DB2 client is set up, you will see all catalogued
+databases in PMF's connection menu. When first connecting to a DB2
+database, a BIND file needs to be bound to this database. This will
+happen automatically.
+<p style="text-align: left;"><br>
+</p>
+
+<p style="text-align: left;"><span style="font-weight: bold;">Connecting
+to Sql Server on Windows</span></p>
+
+<p id="helpCon">Create an ODBC datasource. On 64 bit Windows it is <span style="text-decoration: underline;">extremely important</span> to
+chose the correct ODBC manager.</p>
+
+<p>The standard 64-bit ODBC manager will configure connections for 64
+bit applications and if you <br>
+try to use such a connection with 32-bit applications such as PMF,
+you'll get an error along the lines of "wrong architecture".<br>
+<font color="#464646"> </font></p>
+
+<p>On 32-bit Windows, use </p>
+
+<dl>
+
+  <dd>
+    <pre>c:\WINDOWS\system32\odbcad32.exe</pre>
+  </dd>
+</dl>
+
+On 64-bit Windows, use
+<dl>
+
+  <dd>
+    <pre>c:\windows\SysWOW64\odbcad32.exe</pre>
+  </dd>
+</dl>
+
+This will bring up the ODBC manager for 32 bit applications:<br>
+
+<br>
+
+<img alt="odbc01" src="odbc01.png"><br>
+
+Select<span style="font-weight: bold;"> </span>either "System DSN" or
+"User DSN" and click "Add", <br>
+
+this will bring up the next menu:<br>
+
+<br>
+
+<br>
+
+<img alt="odbc02" src="odbc02.png"><br>
+
+<br>
+
+Select "SQL Server Native Client" with the highest version and click
+"Finish".<br>
+
+<b>(Note: You may have to install "SQL Server Native Client" first)</b><br>
+
+<br>
+
+In the next dialog you need to provide a server name:<br>
+
+<br>
+
+<img alt="odbc03" src="odbc03.png"><br>
+
+<br>
+
+Give the connection a name, in this example it's simply "test". <br>
+
+<br>
+
+In the next step, chose the authentication mode.<br>
+
+<span style="font-weight: bold;">This depends on your environment</span>,
+<span style="font-weight: bold;">so you may have to try <br>
+out both options:</span><br>
+
+<br>
+
+<img alt="odbc05" src="odbc05.png"><br>
+
+<br>
+
+Click "Next" as long as it takes fo finalize the assistant.<br>
+
+<br>
+
+In the last step, test your configuration:<br>
+
+<br>
+
+<img alt="odbc06" src="odbc06.png"><br>
+
+<br>
+
+If the test was successful, start PMF, select "SQL Server" <br>
+
+and select the connection you just created.<br>
+
+<br>
+</body></html>

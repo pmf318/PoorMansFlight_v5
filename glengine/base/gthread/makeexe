@@ -1,0 +1,66 @@
+#
+#  This file is part of PMF (Poor Man's Flight), see README.PMF for details
+#  Author: Gregor Leipelt (gregor@leipelt.de)  (C) G. Leipelt 2000
+#
+
+
+LPATH = ../../lib
+IPATH = ../../inc
+BPATH = ../../bnd
+COPY = cp
+ERASE = rm -f
+DB2PATH=$(HOME)/sqllib
+# The compiler options.
+CFLAGS= -I$(DB2PATH)/include -Wall -I$(QTDIR)/include
+
+# The required libraries
+LIBS= -L$(DB2PATH)/lib -Wl,-rpath,$(DB2PATH)/lib -ldb2 -L$(QTDIR)/lib -lqt
+# Use the cc compiler
+CC=g++
+
+all :  gthread
+
+gthread : gthread.cpp
+	$(CC) -o gthread gthread.cpp -I$(IPATH) -I$(QTDIR)/include $(CLFLAGS) $(LIBS) $(LPATH)/dsqlobj.o $(LPATH)/gstring.o $(LPATH)/linehdl.o $(LPATH)/seqitem.o
+
+clean:
+	$(ERASE) gthread
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

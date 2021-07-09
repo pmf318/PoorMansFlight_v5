@@ -1,0 +1,67 @@
+#
+#  This file is part of PMF (Poor Man's Flight), see README.PMF for details
+#  Author: Gregor Leipelt (gregor@leipelt.de)  (C) G. Leipelt 2000
+#
+
+# Use the cc compiler
+CC=g++
+
+#PATHS
+LPATH=../../lib
+IPATH=../../inc
+
+# The compiler options.
+#CFLAGS=
+
+# The required libraries 
+#LIBS=
+
+COPY = cp
+ERASE = rm -f
+
+all :  gthread.o
+
+gthread.o :
+	$(CC) -c -I$(IPATH) -I$(QTDIR)/include gthread.cpp
+	cp gthread.o $(LPATH)
+clean:
+	$(ERASE) gthread.o
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
