@@ -45,11 +45,11 @@ $ tar -xzf pmf.tar.gz
     and password (pwd)
 
 In a shell:
-$ qmake pmf5.pro "target=db2" "db=databaseName" 
+$ qmake pmf5.pro "target=db2" "db=[databaseName]" 
 - or -
-$ qmake pmf5.pro "target=db2" "db=databaseName" "uid=userName" 
+$ qmake pmf5.pro "target=db2" "db=[databaseName]" "uid=[userName]" 
 - or -
-$ qmake pmf5.pro "target=db2" "db=databaseName" "uid=userName" "pwd=password"
+$ qmake pmf5.pro "target=db2" "db=[databaseName]" "uid=[userName]" "pwd=[password]"
 
 This should generate a Makefile. Next, run
 $ make
