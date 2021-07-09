@@ -177,4 +177,5 @@ When the environment variables are set, run these commands in the command window
   nmake
 (or 'make' for MinGW)
 -------------------------------------------------------------------------------------  
+
   
