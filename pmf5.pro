@@ -76,7 +76,7 @@ contains(trg, "all"){
         SUBDIRS += ./glengine/sql/db2dsql
         SUBDIRS += ./glengine/sql/db2dapi
         SUBDIRS += ./glengine/sql/db2dcli
-	##### Experimental: ######
+	##### Experimental: ##########
         # SUBDIRS += ./glengine/sql/mariadb
         # SUBDIRS += ./glengine/sql/postgres
         message("-> run 'make' or 'nmake' to start building pmf")
