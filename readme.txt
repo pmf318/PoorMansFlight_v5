@@ -1,3 +1,6 @@
+THIS IS PRETTY MUCH OUTDATED.
+CURRENT VERSION ON  leipelt.de
+
 License:
 PMF is released under the GPL. 
 A copy of the GPL can be found in gpl.txt in this directory.
