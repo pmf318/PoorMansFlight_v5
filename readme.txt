@@ -1,3 +1,5 @@
+<td><a href="https://github.com/pmf318/PoorMansFlight_v5/blob/main/pmf5setup_64bit.exe">pmf5setup_64bit.exe.exe</a></td>
+
 THIS IS PRETTY MUCH OUTDATED.
 CURRENT VERSION ON  leipelt.de
 
