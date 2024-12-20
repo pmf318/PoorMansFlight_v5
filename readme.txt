@@ -1,6 +1,3 @@
-Prcoempiled executable: 
-https://github.com/pmf318/PoorMansFlight_v5/blob/main/pmf5setup_64bit.exe"
-
 THIS IS PRETTY MUCH OUTDATED.
 CURRENT VERSION ON  leipelt.de
 
